@@ -1,7 +1,7 @@
 {
   "model": "ccr_monte_carlo",
   "version": "1.0.0",
-  "validation_date": "2026-06-18T08:43:23.354247+00:00",
+  "validation_date": "2026-06-18T09:58:34.412713+00:00",
   "compliance_standard": "cps230",
   "overall_status": "FAIL",
   "tests_run": 8,
@@ -183,7 +183,7 @@
       "trigger_id": "SCHED-ccr_monte_carlo-20260618",
       "trigger_type": "scheduled",
       "model_name": "ccr_monte_carlo",
-      "fired_at": "2026-06-18T08:43:23.352191+00:00",
+      "fired_at": "2026-06-18T09:58:34.410895+00:00",
       "reason": "Scheduled re-validation: 90 days since last run",
       "evidence": {
         "schedule_days": 90
@@ -192,10 +192,10 @@
       "compliance_reference": "CPS 230 Para 34: Periodic review frequency"
     },
     {
-      "trigger_id": "BREACH-ccr_monte_carlo-202606180843",
+      "trigger_id": "BREACH-ccr_monte_carlo-202606180958",
       "trigger_type": "breach",
       "model_name": "ccr_monte_carlo",
-      "fired_at": "2026-06-18T08:43:23.352506+00:00",
+      "fired_at": "2026-06-18T09:58:34.410968+00:00",
       "reason": "PFE breach rate 14.00% exceeds 10%",
       "evidence": {
         "breach_rate": 0.14,

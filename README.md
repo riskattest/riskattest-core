@@ -48,11 +48,16 @@ flowchart LR
     Rec -- OTLP/HTTP-JSON --> SIEM[(Bank SIEM /<br/>OTel collector)]
     Ev --> Rep[Compliance report<br/>CPS 230 / SR 11-7 / SR 26-2 /<br/>EU AI Act / OSFI E-23]
     Rep --> GRC["OpenPages / ServiceNow /<br/>Workiva (roadmap)"]
+    Mon[MonitorRunner<br/>mrm monitor run] -- drift detected --> Ev
+    Mon -- webhook --> WH[Slack / PagerDuty /<br/>ServiceNow]
+    Mon -- metrics --> Src[MLflow / CloudWatch /<br/>Databricks / file]
 
     classDef store fill:#fef3c7,stroke:#d97706,color:#92400e
     classDef ext fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef monitor fill:#dcfce7,stroke:#16a34a,color:#14532d
     class Rec,Ev store
-    class SIEM,GRC ext
+    class SIEM,GRC,WH ext
+    class Mon,Src monitor
 ```
 
 You write a YAML project, declare your models and their tests, point
@@ -95,6 +100,87 @@ Plugins are discovered three ways — bundled, pip-installed via the
 Test packs are pluggable via `@register_test`. The roadmap adds a
 50+-template adversarial pack and financial-F1 entity-weighted accuracy
 ([P11](STRATEGY.md)).
+
+### Continuous model monitoring
+
+Production drift monitoring that runs in the bank's existing scheduler
+(Airflow, cron, Databricks Workflows) — no daemon, no new infrastructure.
+Every monitoring cycle that detects drift produces an immutable
+`EvidencePacket` with compliance paragraph mapping.
+
+| Capability | Details |
+|---|---|
+| **Metric sources** | `builtin` (KS / Page-Hinkley in-process), `file` (JSON / CSV), `mlflow`, `cloudwatch`, `databricks` (Lakehouse Monitoring) |
+| **Drift response** | Freeze `EvidencePacket`, fire `DRIFT` trigger, send webhooks (Slack / PagerDuty / ServiceNow) |
+| **Exit codes** | 0 = no drift, 1 = drift detected, 2 = error — designed for Airflow/scheduler branching |
+| **Graceful degradation** | Per-metric error isolation — one CloudWatch namespace down does not blind the system |
+| **Audit provenance** | Every log entry records `created_by`, `hostname`, `invocation` (scheduler type), `config_hash` (SHA-256) |
+| **Bank IT hardening** | SSL-inspecting proxy support (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `HTTPS_PROXY`), `${VAR}` / `${VAR:-default}` env var expansion — no secrets in YAML |
+| **Databricks integration** | Queries `_drift_metrics` Delta tables via SQL Statement Execution API; reads auth from `DATABRICKS_HOST` / `DATABRICKS_TOKEN` env vars |
+| **Append-only log** | JSONL at `evidence/monitoring/{model_name}/log.jsonl` — immutable audit trail per SR 26-2 §II.AI.D |
+
+```yaml
+# models/ccr/ccr_monte_carlo.yml
+monitoring:
+  enabled: true
+  schedule: "daily"
+  metrics:
+    - name: portfolio_drift
+      source: builtin
+      detector: ks
+      reference_dataset: data/monitoring/reference_portfolio.csv
+      current_dataset: data/monitoring/current_portfolio.csv
+      columns: [notional, pd_annual, lgd]
+      threshold: 0.05
+
+    - name: pfe_breach_rate
+      source: file
+      path: data/monitoring/latest_metrics.json
+      metric_key: pfe_breach_rate
+      threshold: 0.10
+      comparison: greater_than
+
+    - name: lakehouse_drift
+      source: databricks
+      host: ${DATABRICKS_HOST}
+      token: ${DATABRICKS_TOKEN}
+      warehouse_id: ${SQL_WAREHOUSE_ID}
+      table_name: risk_models.ccr.portfolio_data
+      metric_column: ks_statistic
+      filter_column: notional
+      threshold: 0.05
+      comparison: greater_than
+
+  on_drift:
+    revalidate: true
+    freeze_evidence: true
+    resolve_triggers: true
+
+  webhooks:
+    - url: https://hooks.slack.com/services/${WEBHOOK_TOKEN}
+      events: [drift_detected]
+      headers:
+        Authorization: "Bearer ${SLACK_TOKEN}"
+```
+
+```bash
+# Run monitoring for one model
+mrm monitor run --models ccr_monte_carlo
+
+# All models with monitoring.enabled: true
+mrm monitor run --all
+
+# Dry run — check metrics without triggering actions
+mrm monitor run --models ccr_monte_carlo --dry-run
+
+# View monitoring history
+mrm monitor history --model ccr_monte_carlo --last 10
+
+# Dashboard view across all models
+mrm monitor status
+```
+
+Spec: [Continuous Monitoring v1](mrm-core/docs/spec/continuous-monitoring-v1.md).
 
 ### Drift detection
 
@@ -397,6 +483,7 @@ mrm evidence root  publish|verify|show|list-signers
 mrm evidence conformance  run
 mrm replay  record|reconstruct|verify|sample|verify-chain
 mrm triggers  check|list|run
+mrm monitor  run|history|status         # continuous drift monitoring
 mrm catalog  list|publish|sync          # Databricks UC + MLflow
 mrm doctor                              # capability report: drift backends + signers
 mrm debug  --show-config|--show-dag|--show-catalog
@@ -420,6 +507,7 @@ flowchart TB
         Proj[Project + YAML config]
         DAG[DAG / catalog / triggers]
         Eng[TestRunner]
+        Mon[MonitorRunner<br/>continuous drift monitoring]
         Repl[replay/]
         Ev[evidence/]
     end
@@ -427,6 +515,7 @@ flowchart TB
     subgraph Plugins[Pluggable extensions]
         ST["@register_standard<br/>compliance plugins"]
         TS["@register_test<br/>test plugins"]
+        MtS["@_register_source<br/>metric source adapters"]
         EB[EvidenceBackend ABC<br/>WORM substrates]
         RB[ReplayBackend ABC<br/>chain stores]
         MS[Model sources<br/>pickle / MLflow / HF / UC / LLM]
@@ -440,12 +529,16 @@ flowchart TB
     end
 
     CLI --> Eng
+    CLI --> Mon
     Proj --> DAG --> Eng
     Eng -.calls.-> MS
     Eng -.emits.-> Repl
     Eng -.emits.-> Ev
+    Mon -.collects.-> MtS
+    Mon -.emits.-> Ev
     ST --> Eng
     TS --> Eng
+    MtS --> MLOps
     Repl --> RB --> WORM
     Repl --> SIEM
     Ev --> EB --> WORM
@@ -454,11 +547,11 @@ flowchart TB
 
     classDef plug fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
     classDef ext fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class ST,TS,EB,RB,MS plug
+    class ST,TS,MtS,EB,RB,MS plug
     class MLOps,WORM,SIEM,GRCx ext
 ```
 
-Five plug points, all behind small, versioned contracts. The
+Six plug points, all behind small, versioned contracts. The
 contracts are documented in [`docs/spec/`](mrm-core/docs/spec/).
 
 ---
@@ -475,6 +568,10 @@ pip install -e .
 cd ccr_example
 python setup_ccr_example.py     # synthetic data + pickled model
 python run_validation.py        # 8 tests + triggers + report
+
+# set up continuous monitoring
+python setup_monitoring.py      # generate reference + current datasets
+mrm monitor run --models ccr_monte_carlo
 
 # or via the CLI
 mrm docs generate ccr_monte_carlo --compliance standard:cps230
@@ -575,7 +672,13 @@ mrm-core/
 │   ├── engine/runner.py           Test runner with replay wiring
 │   ├── evidence/                  Hash-chained evidence vault
 │   │   └── backends/              local · s3_object_lock
-│   ├── replay/                    1:1 Decision Replay (NEW)
+│   ├── monitor/                   Continuous drift monitoring
+│   │   ├── config.py              YAML config parsing + ${VAR} expansion
+│   │   ├── metrics.py             Source adapters (builtin · file · mlflow · cloudwatch · databricks)
+│   │   ├── runner.py              Orchestrator: collect → evaluate → evidence → webhook
+│   │   ├── log.py                 Append-only JSONL audit log
+│   │   └── webhook.py             Webhook sender with proxy/TLS support
+│   ├── replay/                    1:1 Decision Replay
 │   │   ├── record.py              DecisionRecord schema
 │   │   ├── capture.py             @capture decorator + context manager
 │   │   ├── instrument.py          Universal predictor + LLM capture
@@ -613,9 +716,10 @@ mrm-core/
 - GenAI test pack — 14 tests, LiteLLM unified interface, RAG validation
 - **1:1 Decision Replay — DecisionRecord, capture, OTLP, verify, backends, CLI**
 - Replay capture for **all** model types — sklearn, HF, MLflow, LiteLLM, legacy LLM adapters
+- **Continuous model monitoring — 5 metric source adapters (builtin / file / mlflow / cloudwatch / databricks), drift-triggered re-validation with EvidencePacket freeze + DRIFT triggers + webhook notifications, append-only audit log with provenance, bank IT hardening (proxy/TLS, `${VAR}` env expansion), graceful degradation, Databricks Lakehouse Monitoring integration via SQL Statement Execution API**
 - ADRs + spec PRDs + GOVERNANCE.md posture
 
-**Test coverage:** 158 pytest passing + 59 end-to-end acceptance
+**Test coverage:** 256 pytest passing + 59 end-to-end acceptance
 checks against the worked examples.
 
 **Next:** 50+-template adversarial pack, GRC connectors (OpenPages,

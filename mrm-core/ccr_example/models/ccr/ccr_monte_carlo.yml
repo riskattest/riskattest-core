@@ -179,11 +179,47 @@ compliance:
             requirement: "Risk mitigation and controls"
             evidence: "Collateral effectiveness test validates CSA modelling"
 
-# Ongoing monitoring
+# ============================================================================
+# Continuous Monitoring — drift-triggered re-validation
+# See docs/spec/continuous-monitoring-v1.md
+# ============================================================================
 monitoring:
+  enabled: true
+  schedule: "daily"          # Informational; actual schedule is the caller's job
+
   metrics:
-    - expected_positive_exposure
-    - potential_future_exposure
-    - credit_valuation_adjustment
-    - pfe_breach_rate
-    - mc_convergence_ratio
+    # Data drift on key risk columns (training vs current portfolio)
+    - name: portfolio_drift
+      source: builtin
+      detector: ks
+      reference_dataset: data/monitoring/reference_portfolio.csv
+      current_dataset: data/monitoring/current_portfolio.csv
+      columns: [notional, pd_annual, lgd]
+      threshold: 0.05         # KS p-value
+
+    # Model performance metric from latest evaluation
+    - name: pfe_breach_rate
+      source: file
+      path: data/monitoring/latest_metrics.json
+      metric_key: pfe_breach_rate
+      threshold: 0.10
+      comparison: greater_than  # Drift if breach rate > 10%
+
+    # MC convergence quality
+    - name: mc_convergence
+      source: file
+      path: data/monitoring/latest_metrics.json
+      metric_key: mc_convergence_ratio
+      threshold: 0.95
+      comparison: less_than    # Drift if convergence < 95%
+
+  on_drift:
+    revalidate: true           # Run full test suite
+    freeze_evidence: true      # Create EvidencePacket
+    resolve_triggers: true     # Mark old triggers as resolved after re-val
+
+  webhooks: []                 # Configure for production use:
+  # - url: ${MONITORING_WEBHOOK_URL}
+  #   events: [drift_detected, revalidation_complete]
+  #   headers:
+  #     Authorization: "Bearer ${WEBHOOK_TOKEN}"

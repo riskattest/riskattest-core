@@ -502,6 +502,80 @@ Read in order:
 5. **DAG_FEATURES.md** - DAG functionality
 6. **ARCHITECTURE.md** - Technical details
 
+### 9. Continuous Model Monitoring
+
+**Production drift monitoring that runs in the bank's existing scheduler:**
+
+```yaml
+# models/ccr/ccr_monte_carlo.yml
+monitoring:
+  enabled: true
+  schedule: "daily"
+  metrics:
+    - name: portfolio_drift
+      source: builtin
+      detector: ks
+      reference_dataset: data/monitoring/reference_portfolio.csv
+      current_dataset: data/monitoring/current_portfolio.csv
+      columns: [notional, pd_annual, lgd]
+      threshold: 0.05
+
+    - name: pfe_breach_rate
+      source: file
+      path: data/monitoring/latest_metrics.json
+      metric_key: pfe_breach_rate
+      threshold: 0.10
+      comparison: greater_than
+
+    - name: lakehouse_drift
+      source: databricks
+      host: ${DATABRICKS_HOST}
+      token: ${DATABRICKS_TOKEN}
+      warehouse_id: ${SQL_WAREHOUSE_ID}
+      table_name: risk_models.ccr.portfolio_data
+      metric_column: ks_statistic
+      threshold: 0.05
+      comparison: greater_than
+
+  on_drift:
+    revalidate: true
+    freeze_evidence: true      # Creates immutable EvidencePacket
+    resolve_triggers: true     # Fires DRIFT trigger
+
+  webhooks:
+    - url: https://hooks.slack.com/services/${WEBHOOK_TOKEN}
+      events: [drift_detected]
+      headers:
+        Authorization: "Bearer ${SLACK_TOKEN}"
+      timeout: 60
+```
+
+**CLI Commands:**
+```bash
+mrm monitor run --models ccr_monte_carlo     # One monitoring cycle
+mrm monitor run --all                         # All monitored models
+mrm monitor run --models ccr_monte_carlo --dry-run  # Check without acting
+mrm monitor history --model ccr_monte_carlo --last 10
+mrm monitor status                            # Dashboard across all models
+```
+
+**Features:**
+- **5 metric source adapters:** `builtin` (KS / Page-Hinkley), `file` (JSON / CSV), `mlflow`, `cloudwatch`, `databricks` (Lakehouse Monitoring)
+- **No daemon** — single CLI invocation; bank's scheduler (Airflow, cron, Databricks Workflows) calls it
+- **Drift response:** freeze `EvidencePacket`, fire `DRIFT` trigger, send webhooks
+- **Exit codes:** 0 = no drift, 1 = drift, 2 = error (designed for Airflow branching)
+- **Graceful degradation:** one source failure does not abort the entire run
+- **Audit provenance:** every log entry records `created_by`, `hostname`, `invocation`, `config_hash`
+- **Bank IT hardening:** SSL-inspecting proxy support, `${VAR}` / `${VAR:-default}` env var expansion
+- **Append-only JSONL log:** immutable audit trail per SR 26-2 §II.AI.D
+- **Databricks integration:** queries `_drift_metrics` Delta tables via SQL Statement Execution API
+
+**Integration patterns:**
+- **Airflow:** `BashOperator` with exit code branching
+- **Databricks Workflows:** notebook cell or Shell task
+- **AWS Step Functions:** ECS/Lambda task reading CloudWatch metrics
+- **Cron:** standard crontab entry
+
 ## What's Next
 
 The framework is **complete and production-ready**. Future enhancements could include:
@@ -516,15 +590,13 @@ The framework is **complete and production-ready**. Future enhancements could in
 - [ ] Web UI
 - [ ] Lineage visualization
 - [ ] Test result trends
-- [ ] Automated alerts
+- [ ] GRC connectors (OpenPages, ServiceNow, Workiva)
 
 ### Phase 3 (Enterprise)
 - [ ] Multi-user support
 - [ ] RBAC
-- [ ] Scheduled runs
-- [ ] Dashboard
-
-But **everything you need is already here!**
+- [ ] XVA worked example via ORE
+- [ ] 50+-template adversarial pack
 
 ## Summary
 
@@ -538,9 +610,12 @@ MRM Core now has:
  **Model Catalog** - Central registry  
  **Topological Sort** - Automatic ordering  
  **Parallel Execution** - Independent models  
+ **Continuous Monitoring** - 5 metric sources, drift-triggered evidence + webhooks  
+ **Bank IT Hardening** - Proxy/TLS, env var expansion, audit provenance  
+ **Databricks Integration** - Unity Catalog + Lakehouse Monitoring  
  **Type Safety** - Validated references  
  **Open Source** - Apache 2.0  
 
-**It's dbt for model validation, with HuggingFace integration and sophisticated dependency management!**
+**It's dbt for model validation and monitoring, with deep cloud integration and bank-grade security!**
 
 Use it today to modernize your model risk management workflows.

@@ -4,7 +4,7 @@
 |-------|-------|
 | **Model** | ccr_monte_carlo |
 | **Version** | 1.0.0 |
-| **Report Date** | 2026-06-18 08:43 UTC |
+| **Report Date** | 2026-06-18 09:58 UTC |
 | **Regulatory Framework** | APRA CPS 230 -- Operational Risk Management |
 | **Risk Tier** | tier_1 |
 | **Owner** | market_risk_team |
@@ -341,8 +341,8 @@ ongoing monitoring and timely response to material changes.
 
 | Trigger ID | Type | Fired At | Reason | Status |
 |------------|------|----------|--------|--------|
-| SCHED-ccr_monte_carlo-20260618 | scheduled | 2026-06-18T08:43:23 | Scheduled re-validation: 90 days since last run | fired |
-| BREACH-ccr_monte_carlo-202606180843 | breach | 2026-06-18T08:43:23 | PFE breach rate 14.00% exceeds 10% | fired |
+| SCHED-ccr_monte_carlo-20260618 | scheduled | 2026-06-18T09:58:34 | Scheduled re-validation: 90 days since last run | fired |
+| BREACH-ccr_monte_carlo-202606180958 | breach | 2026-06-18T09:58:34 | PFE breach rate 14.00% exceeds 10% | fired |
 
 ### 5.3 Re-validation Schedule
 
@@ -400,6 +400,6 @@ representation of the validation outcomes.
 
 ---
 
-*Report generated: 2026-06-18 08:43 UTC*
+*Report generated: 2026-06-18 09:58 UTC*
 *MRM Framework Version: 0.1.0*
 *Regulatory Framework: APRA CPS 230 -- Operational Risk Management*

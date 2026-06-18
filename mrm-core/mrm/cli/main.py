@@ -2363,9 +2363,9 @@ def portal_export(
         ..., "--end", "-e",
         help="Date range end (YYYY-MM-DD)",
     ),
-    standards: Optional[str] = typer.Option(
-        None, "--standards",
-        help="Comma-separated standards (default: all)",
+    compliance: Optional[str] = typer.Option(
+        None, "--compliance",
+        help="Filter to a single compliance standard (e.g. standard:cps230)",
     ),
     output: str = typer.Option(
         "export.zip", "--output", "-o",
@@ -2435,13 +2435,13 @@ def portal_export(
 
         mrm portal export --models ccr_monte_carlo --start 2025-07-01 --end 2026-06-18
 
-        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --standards cps230 --signer local --key-path evidence/signer.key
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --compliance standard:cps230 --signer local --key-path evidence/signer.key
 
         mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --upload s3://my-bucket/exports/ --presign-expiry 7d
 
         mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --dry-run
 
-        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --decision-sample 100
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --compliance standard:cps230 --decision-sample 100
     """
     import getpass
     import os
@@ -2453,11 +2453,22 @@ def portal_export(
         project = Project.load(profile=profile)
 
         model_list = [m.strip() for m in models.split(",")]
-        standard_list = (
-            [s.strip() for s in standards.split(",")]
-            if standards
-            else None
-        )
+
+        # Parse compliance standard (follows mrm docs generate pattern)
+        standard_list = None
+        if compliance:
+            if ":" in compliance:
+                prefix, standard_name = compliance.split(":", 1)
+                if prefix != "standard":
+                    console.print(
+                        f"[red]Invalid compliance format '{compliance}'.[/red]"
+                        " Use standard:<name> (e.g. standard:cps230)",
+                        style="red",
+                    )
+                    raise typer.Exit(1)
+            else:
+                standard_name = compliance
+            standard_list = [standard_name]
 
         # --- Collect all data ---
         data = _collect_export_data(
@@ -2495,6 +2506,8 @@ def portal_export(
             console.print(f"Inclusion proofs: {len(data['inclusion_proofs'])}")
             console.print(f"Date range:       {start} to {end}")
             console.print(f"Decision sample:  n={decision_sample} per model")
+            if compliance:
+                console.print(f"Compliance:       {standard_list[0] if standard_list else compliance}")
             if signer_name:
                 console.print(f"Signer:           {signer_name}")
             else:
@@ -2795,6 +2808,303 @@ def portal_verify(
                 "\n[red]Export verification FAILED[/red]"
             )
             raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# mrm monitor — continuous model monitoring
+# ---------------------------------------------------------------------------
+
+monitor_app = typer.Typer(help="Continuous model monitoring with drift-triggered re-validation")
+app.add_typer(monitor_app, name="monitor")
+
+
+@monitor_app.command("run")
+def monitor_run(
+    models: Optional[str] = typer.Option(
+        None, "--models", "-m",
+        help="Comma-separated model names to monitor",
+    ),
+    all_models: bool = typer.Option(
+        False, "--all",
+        help="Monitor all models with monitoring.enabled: true",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Check metrics and report drift, don't revalidate",
+    ),
+    profile: str = typer.Option(
+        "dev", "--profile", "-p",
+        help="Profile to use",
+    ),
+):
+    """Run one monitoring cycle.
+
+    Collects metrics from configured sources, evaluates thresholds,
+    and triggers re-validation if drift is detected. Designed to be
+    called by the bank's scheduler (Airflow, cron, Databricks Workflows).
+
+    Exit codes:
+      0 = no drift detected
+      1 = drift detected
+      2 = error
+
+    Examples:
+
+        mrm monitor run --models ccr_monte_carlo
+
+        mrm monitor run --all
+
+        mrm monitor run --models ccr_monte_carlo --dry-run
+    """
+    from mrm.monitor.runner import MonitorRunner
+
+    try:
+        project = Project.load(profile=profile)
+
+        # Determine which models to monitor
+        if all_models:
+            model_configs = project.list_models()
+        elif models:
+            model_configs = project.select_models(models=models)
+        else:
+            console.print(
+                "Specify --models or --all", style="red"
+            )
+            raise typer.Exit(2)
+
+        if not model_configs:
+            console.print("No models selected", style="yellow")
+            raise typer.Exit(0)
+
+        log_dir = project.root_path / "evidence" / "monitoring"
+        runner = MonitorRunner(log_dir=log_dir)
+
+        overall_exit = 0
+        results = []
+
+        for mc in model_configs:
+            model_name = mc.get("model", {}).get("name", "?")
+            monitoring_raw = mc.get("monitoring")
+
+            if not monitoring_raw or not monitoring_raw.get("enabled"):
+                console.print(
+                    f"  [dim]{model_name}: monitoring disabled, skipping[/dim]"
+                )
+                continue
+
+            console.print(f"\nMonitoring [bold]{model_name}[/bold]...")
+
+            if dry_run:
+                # Dry run: collect metrics and report, don't revalidate
+                from mrm.monitor.config import parse_monitoring_config
+                from mrm.monitor.metrics import get_metric_source
+
+                config = parse_monitoring_config(monitoring_raw)
+                console.print(f"  Metrics configured: {len(config.metrics)}")
+                for metric_cfg in config.metrics:
+                    try:
+                        source = get_metric_source(metric_cfg.source)
+                        result = source.collect(metric_cfg)
+                        status = "[red]DRIFT[/red]" if result.drifted else "[green]OK[/green]"
+                        console.print(
+                            f"  {metric_cfg.name}: {status} "
+                            f"(value={result.value:.4f}, threshold={metric_cfg.threshold})"
+                        )
+                    except Exception as exc:
+                        console.print(
+                            f"  {metric_cfg.name}: [yellow]ERROR: {exc}[/yellow]"
+                        )
+                continue
+
+            result = runner.run(mc)
+            results.append(result)
+
+            if result.skipped:
+                console.print(f"  [dim]Skipped (disabled)[/dim]")
+            elif result.exit_code == 2:
+                console.print(f"  [red]Error: {result.error}[/red]")
+                overall_exit = max(overall_exit, 2)
+            elif result.overall_drifted:
+                console.print(f"  [red]Drift detected[/red]")
+                for m in result.metric_results:
+                    status = "[red]DRIFT[/red]" if m.drifted else "[green]OK[/green]"
+                    console.print(
+                        f"    {m.name}: {status} "
+                        f"(value={m.value:.4f}, threshold={m.threshold})"
+                    )
+                overall_exit = max(overall_exit, 1)
+            else:
+                console.print(f"  [green]No drift[/green]")
+                for m in result.metric_results:
+                    console.print(
+                        f"    {m.name}: [green]OK[/green] "
+                        f"(value={m.value:.4f}, threshold={m.threshold})"
+                    )
+
+        if dry_run:
+            console.print("\n[dim]Dry run complete. Remove --dry-run to trigger actions.[/dim]")
+            raise typer.Exit(0)
+
+        # Print summary
+        console.print()
+        drifted_count = sum(1 for r in results if r.overall_drifted)
+        error_count = sum(1 for r in results if r.exit_code == 2)
+        ok_count = sum(
+            1 for r in results
+            if not r.overall_drifted and r.exit_code != 2 and not r.skipped
+        )
+        console.print(
+            f"Summary: {ok_count} OK, {drifted_count} drifted, "
+            f"{error_count} error(s)"
+        )
+
+        raise typer.Exit(overall_exit)
+
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        console.print(f" {e}", style="red")
+        raise typer.Exit(2)
+    except Exception as e:
+        console.print(f" Error: {e}", style="red")
+        import traceback
+        traceback.print_exc()
+        raise typer.Exit(2)
+
+
+@monitor_app.command("history")
+def monitor_history(
+    model: str = typer.Option(
+        ..., "--model", "-m",
+        help="Model name",
+    ),
+    last: int = typer.Option(
+        10, "--last", "-n",
+        help="Number of entries to show",
+    ),
+    profile: str = typer.Option(
+        "dev", "--profile", "-p",
+        help="Profile to use",
+    ),
+):
+    """Show monitoring history for a model.
+
+    Example:
+
+        mrm monitor history --model ccr_monte_carlo --last 10
+    """
+    from mrm.monitor.log import MonitoringLog
+
+    try:
+        project = Project.load(profile=profile)
+        log_dir = project.root_path / "evidence" / "monitoring" / model
+        log = MonitoringLog(log_dir)
+        entries = log.read_last(last)
+
+        if not entries:
+            console.print(f"No monitoring history for {model}", style="yellow")
+            raise typer.Exit(0)
+
+        table = Table(
+            title=f"Monitoring History: {model} (last {last})",
+            show_header=True,
+        )
+        table.add_column("Timestamp", style="cyan")
+        table.add_column("Run ID", style="dim", max_width=12)
+        table.add_column("Drifted", justify="center")
+        table.add_column("Action")
+        table.add_column("Exit")
+
+        for entry in entries:
+            ts = entry.get("timestamp", "?")[:19]
+            run_id = entry.get("run_id", "?")[:8]
+            drifted = entry.get("overall_drifted", False)
+            drifted_str = "[red]YES[/red]" if drifted else "[green]no[/green]"
+            action = entry.get("action_taken", "none")
+            exit_code = str(entry.get("exit_code", "?"))
+
+            table.add_row(ts, run_id, drifted_str, action, exit_code)
+
+        console.print(table)
+
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        console.print(f" {e}", style="red")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f" Error: {e}", style="red")
+        raise typer.Exit(1)
+
+
+@monitor_app.command("status")
+def monitor_status(
+    profile: str = typer.Option(
+        "dev", "--profile", "-p",
+        help="Profile to use",
+    ),
+):
+    """Show monitoring status across all models.
+
+    Example:
+
+        mrm monitor status
+    """
+    from mrm.monitor.log import MonitoringLog
+
+    try:
+        project = Project.load(profile=profile)
+        all_models = project.list_models()
+
+        table = Table(
+            title="Monitoring Status",
+            show_header=True,
+        )
+        table.add_column("Model", style="cyan")
+        table.add_column("Monitoring", justify="center")
+        table.add_column("Last Run", style="dim")
+        table.add_column("Last Status", justify="center")
+        table.add_column("Total Runs", justify="right")
+
+        for mc in all_models:
+            model_name = mc.get("model", {}).get("name", "?")
+            monitoring_raw = mc.get("monitoring", {})
+            enabled = monitoring_raw.get("enabled", False)
+
+            enabled_str = "[green]on[/green]" if enabled else "[dim]off[/dim]"
+            last_run = "-"
+            last_status = "-"
+            total_runs = "0"
+
+            if enabled:
+                log_dir = (
+                    project.root_path / "evidence" / "monitoring" / model_name
+                )
+                log = MonitoringLog(log_dir)
+                entries = log.read_all()
+                total_runs = str(len(entries))
+                if entries:
+                    last_entry = entries[-1]
+                    last_run = last_entry.get("timestamp", "?")[:16]
+                    drifted = last_entry.get("overall_drifted", False)
+                    last_status = (
+                        "[red]DRIFT[/red]" if drifted else "[green]OK[/green]"
+                    )
+
+            table.add_row(
+                model_name, enabled_str, last_run, last_status, total_runs
+            )
+
+        console.print(table)
+
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        console.print(f" {e}", style="red")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f" Error: {e}", style="red")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
