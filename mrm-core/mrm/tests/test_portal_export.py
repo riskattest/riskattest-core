@@ -401,3 +401,122 @@ class TestVerifyExportScript:
                     "sys",
                     "pathlib",
                 }, f"verify_export.py imports non-stdlib module: {module}"
+
+
+# ---------------------------------------------------------------------------
+# Signing — attestations carry a real signature when a signer is provided
+# ---------------------------------------------------------------------------
+
+
+class TestExportSigning:
+    def test_unsigned_attestations_have_null_signature(self, tmp_path):
+        """Without a signer, attestations must have signature=null."""
+        output = _build_minimal_export(tmp_path)
+        export_dir = _extract_export(output, tmp_path)
+        for att_file in (export_dir / "attestations").glob("*.json"):
+            with open(att_file, "r") as f:
+                att = json.load(f)
+            assert att["signature"] is None
+            assert att["signer"] is None
+
+    def test_signed_attestations_have_valid_signature(self, tmp_path):
+        """With a local signer, attestations carry a verifiable HMAC."""
+        from mrm.evidence.sign import LocalSigner
+
+        key_path = tmp_path / "signer.key"
+        signer = LocalSigner(key_path)
+
+        scope = ExportScope(
+            models=["test_model"],
+            date_start="2026-06-15",
+            date_end="2026-06-18",
+            standards=["cps230"],
+        )
+        builder = ExportBuilder(
+            scope=scope, created_by="test@bank.com", signer=signer
+        )
+        builder.add_evidence_packets("test_model", _sample_packets(2))
+        builder.add_merkle_roots([_sample_merkle_root()])
+        builder.add_inclusion_proofs([])
+
+        output = tmp_path / "signed.zip"
+        builder.build(output)
+        export_dir = _extract_export(output, tmp_path)
+
+        for att_file in (export_dir / "attestations").glob("*.json"):
+            with open(att_file, "r") as f:
+                att = json.load(f)
+            assert att["signature"] is not None, f"Missing signature: {att_file.name}"
+            assert att["signer"] == "local"
+            assert len(att["signature"]) == 64  # HMAC-SHA256 hex
+
+    def test_signed_export_passes_verification(self, tmp_path):
+        """A signed export must still pass verify_export.py."""
+        from mrm.evidence.sign import LocalSigner
+
+        key_path = tmp_path / "signer.key"
+        signer = LocalSigner(key_path)
+
+        scope = ExportScope(
+            models=["test_model"],
+            date_start="2026-06-15",
+            date_end="2026-06-18",
+        )
+        builder = ExportBuilder(
+            scope=scope, created_by="test@bank.com", signer=signer
+        )
+        builder.add_evidence_packets("test_model", _sample_packets(3))
+        builder.add_merkle_roots([_sample_merkle_root()])
+        builder.add_inclusion_proofs([])
+
+        output = tmp_path / "signed.zip"
+        builder.build(output)
+        export_dir = _extract_export(output, tmp_path)
+
+        result = subprocess.run(
+            [sys.executable, str(export_dir / "verify_export.py")],
+            capture_output=True,
+            text=True,
+            cwd=str(export_dir),
+        )
+        assert result.returncode == 0, (
+            f"verify_export.py failed on signed export:\n{result.stdout}\n{result.stderr}"
+        )
+        assert "ALL CHECKS PASSED" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Signer.sign_bytes — bridge method
+# ---------------------------------------------------------------------------
+
+
+class TestSignerSignBytes:
+    def test_local_signer_sign_bytes(self, tmp_path):
+        """LocalSigner.sign_bytes returns a valid HMAC hex string."""
+        from mrm.evidence.sign import LocalSigner
+
+        key_path = tmp_path / "signer.key"
+        signer = LocalSigner(key_path)
+        sig = signer.sign_bytes(b"hello world")
+        assert isinstance(sig, str)
+        assert len(sig) == 64  # HMAC-SHA256 hex
+
+    def test_local_signer_sign_bytes_deterministic(self, tmp_path):
+        """Same input produces the same signature."""
+        from mrm.evidence.sign import LocalSigner
+
+        key_path = tmp_path / "signer.key"
+        signer = LocalSigner(key_path)
+        sig1 = signer.sign_bytes(b"test data")
+        sig2 = signer.sign_bytes(b"test data")
+        assert sig1 == sig2
+
+    def test_local_signer_sign_bytes_different_inputs(self, tmp_path):
+        """Different inputs produce different signatures."""
+        from mrm.evidence.sign import LocalSigner
+
+        key_path = tmp_path / "signer.key"
+        signer = LocalSigner(key_path)
+        sig1 = signer.sign_bytes(b"data A")
+        sig2 = signer.sign_bytes(b"data B")
+        assert sig1 != sig2

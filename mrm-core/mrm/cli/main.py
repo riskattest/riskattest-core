@@ -2136,6 +2136,219 @@ portal_app = typer.Typer(help="Self-verifying evidence export for regulators")
 app.add_typer(portal_app, name="portal")
 
 
+def _collect_export_data(
+    project,
+    model_list: List[str],
+    standard_list: Optional[List[str]],
+    start: str,
+    end: str,
+    include_decisions: bool,
+    decision_sample_n: int,
+    evidence_backend: Optional[str],
+    evidence_bucket: Optional[str],
+    replay_backend: Optional[str],
+    replay_bucket: Optional[str],
+    profile: str,
+) -> Dict[str, Any]:
+    """Gather evidence, decisions, reports, roots, and proofs.
+
+    Returns a summary dict used by both ``--dry-run`` and the real build.
+    """
+    from pathlib import Path as PathLib
+
+    summary: Dict[str, Any] = {
+        "models": {},
+        "merkle_roots": [],
+        "inclusion_proofs": [],
+        "ev_backend": None,
+    }
+
+    # --- Resolve evidence backend ---
+    ev_backend = None
+    try:
+        ev_backend, _, _ = _build_evidence_backend(
+            project,
+            backend_flag=evidence_backend,
+            bucket_flag=evidence_bucket,
+            retention_flag=None,
+        )
+        summary["ev_backend"] = ev_backend
+    except (typer.Exit, Exception) as exc:
+        console.print(
+            f"[yellow]Warning: could not load evidence backend: {exc}. "
+            f"Continuing with empty evidence.[/yellow]"
+        )
+
+    all_leaf_hashes: Dict[str, list] = {}  # epoch -> [content_hash, ...]
+
+    for model_name in model_list:
+        console.print(f"Collecting evidence for [bold]{model_name}[/bold]...")
+        model_data: Dict[str, Any] = {
+            "packets": [],
+            "decision_records": [],
+            "reports": {},
+        }
+
+        # --- Evidence packets ---
+        if ev_backend is not None:
+            try:
+                packet_metas = ev_backend.list_packets(
+                    model_name=model_name,
+                    start_date=start,
+                    end_date=end,
+                )
+                # list_packets returns descending; reverse to
+                # chronological so the hash chain is in append order.
+                for meta in reversed(packet_metas or []):
+                    uri = meta.get("uri")
+                    if uri:
+                        try:
+                            full_packet = ev_backend.retrieve(uri)
+                            model_data["packets"].append(full_packet.to_dict())
+                        except Exception:
+                            model_data["packets"].append(meta)
+                    else:
+                        model_data["packets"].append(meta)
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not load packets: {exc}[/yellow]"
+                )
+
+        console.print(f"  {len(model_data['packets'])} evidence packet(s)")
+
+        # Collect leaf hashes for inclusion proofs
+        for pkt in model_data["packets"]:
+            ts = pkt.get("timestamp", "")[:10]
+            if ts:
+                all_leaf_hashes.setdefault(ts, []).append(
+                    pkt.get("content_hash", "")
+                )
+
+        # --- Decision records (sampled) ---
+        if include_decisions:
+            try:
+                replay_be = _load_replay_backend(
+                    profile, replay_backend, replay_bucket
+                )
+                records = replay_be.sample(
+                    model_name=model_name,
+                    since=start,
+                    until=end,
+                    n=decision_sample_n,
+                )
+                model_data["decision_records"] = [
+                    r.model_dump(mode="json")
+                    if hasattr(r, "model_dump")
+                    else r.dict()
+                    for r in records
+                ]
+                console.print(
+                    f"  {len(model_data['decision_records'])} decision record(s)"
+                    + (f" (sampled, n={decision_sample_n})" if len(records) == decision_sample_n else "")
+                )
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not load decision records: {exc}[/yellow]"
+                )
+
+        # --- Compliance reports ---
+        report_standards = standard_list or []
+        if not report_standards:
+            try:
+                from mrm.compliance.registry import compliance_registry
+
+                compliance_registry.load_builtin_standards()
+                report_standards = list(compliance_registry.list_standards())
+            except Exception:
+                pass
+
+        # Run tests once per model (not per standard)
+        test_results: Dict[str, Any] = {}
+        model_configs = project.select_models(models=model_name)
+        if model_configs and report_standards:
+            mc = model_configs[0]
+            try:
+                runner = TestRunner(
+                    project.config, project.backend, project.catalog
+                )
+                results = runner.run_tests([mc])
+                model_results = results.get(model_name, {})
+                test_results = model_results.get("test_results", {})
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not run tests: {exc}[/yellow]"
+                )
+
+        for std_name in report_standards:
+            try:
+                from mrm.compliance.report_generator import (
+                    generate_compliance_report,
+                )
+
+                if model_configs:
+                    report_text = generate_compliance_report(
+                        standard_name=std_name,
+                        model_name=model_name,
+                        model_config=model_configs[0],
+                        test_results=test_results,
+                        trigger_events=[],
+                    )
+                    model_data["reports"][std_name] = report_text
+                    console.print(f"  Generated {std_name} report")
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not generate {std_name} report: {exc}[/yellow]"
+                )
+
+        summary["models"][model_name] = model_data
+
+    # --- Merkle roots ---
+    merkle_roots: list = []
+    try:
+        roots_dir = PathLib(project.root_path / "evidence" / "roots")
+        if roots_dir.exists():
+            from mrm.evidence.merkle import read_root
+
+            for root_file in sorted(roots_dir.glob("*.root.json")):
+                epoch = root_file.stem.replace(".root", "")
+                if start <= epoch <= end:
+                    try:
+                        root = read_root(roots_dir, epoch)
+                        merkle_roots.append(root.to_dict())
+                    except Exception:
+                        pass
+        if merkle_roots:
+            console.print(f"  {len(merkle_roots)} Merkle root(s)")
+    except Exception as exc:
+        console.print(
+            f"  [yellow]Could not load Merkle roots: {exc}[/yellow]"
+        )
+    summary["merkle_roots"] = merkle_roots
+
+    # --- Inclusion proofs ---
+    inclusion_proofs: list = []
+    try:
+        from mrm.portal.merkle_proof import build_inclusion_proof as _bip
+
+        for epoch, hashes in all_leaf_hashes.items():
+            valid_hashes = [h for h in hashes if h and len(h) == 64]
+            for idx, _h in enumerate(valid_hashes):
+                try:
+                    proof = _bip(valid_hashes, idx, f"pkt-{idx}", epoch)
+                    inclusion_proofs.append(proof.to_dict())
+                except Exception:
+                    pass
+    except Exception as exc:
+        console.print(
+            f"  [yellow]Could not build inclusion proofs: {exc}[/yellow]"
+        )
+    if inclusion_proofs:
+        console.print(f"  {len(inclusion_proofs)} inclusion proof(s)")
+    summary["inclusion_proofs"] = inclusion_proofs
+
+    return summary
+
+
 @portal_app.command("export")
 def portal_export(
     models: str = typer.Option(
@@ -2165,6 +2378,30 @@ def portal_export(
     include_decisions: bool = typer.Option(
         True, "--decisions/--no-decisions",
         help="Include decision records",
+    ),
+    decision_sample: int = typer.Option(
+        500, "--decision-sample", "-n",
+        help="Max decision records per model (statistical sample)",
+    ),
+    signer_name: Optional[str] = typer.Option(
+        None, "--signer",
+        help="Sign attestations: local | gpg | age | kms",
+    ),
+    key_path: Optional[str] = typer.Option(
+        None, "--key-path",
+        help="Key file for local signer",
+    ),
+    upload: Optional[str] = typer.Option(
+        None, "--upload",
+        help="Upload to S3 and generate pre-signed URL (s3://bucket/prefix)",
+    ),
+    presign_expiry: str = typer.Option(
+        "7d", "--presign-expiry",
+        help="Pre-signed URL expiry (e.g. 7d, 24h, 3600s)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Preview what would be included without building the ZIP",
     ),
     evidence_backend: Optional[str] = typer.Option(
         None, "--evidence-backend",
@@ -2198,7 +2435,13 @@ def portal_export(
 
         mrm portal export --models ccr_monte_carlo --start 2025-07-01 --end 2026-06-18
 
-        mrm portal export --models ccr_monte_carlo --start 2025-07-01 --end 2026-06-18 --standards cps230 -o /tmp/export.zip
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --standards cps230 --signer local --key-path evidence/signer.key
+
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --upload s3://my-bucket/exports/ --presign-expiry 7d
+
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --dry-run
+
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --decision-sample 100
     """
     import getpass
     import os
@@ -2216,6 +2459,59 @@ def portal_export(
             else None
         )
 
+        # --- Collect all data ---
+        data = _collect_export_data(
+            project=project,
+            model_list=model_list,
+            standard_list=standard_list,
+            start=start,
+            end=end,
+            include_decisions=include_decisions,
+            decision_sample_n=decision_sample,
+            evidence_backend=evidence_backend,
+            evidence_bucket=evidence_bucket,
+            replay_backend=replay_backend,
+            replay_bucket=replay_bucket,
+            profile=profile,
+        )
+
+        # --- Dry-run: just print summary ---
+        if dry_run:
+            console.print("\n[bold cyan]--- DRY RUN (no ZIP created) ---[/bold cyan]\n")
+            table = Table(title="Export Preview", show_header=True)
+            table.add_column("Model", style="cyan")
+            table.add_column("Evidence Packets", justify="right")
+            table.add_column("Decision Records", justify="right")
+            table.add_column("Compliance Reports")
+            for mname, mdata in data["models"].items():
+                table.add_row(
+                    mname,
+                    str(len(mdata["packets"])),
+                    str(len(mdata["decision_records"])),
+                    ", ".join(mdata["reports"].keys()) or "(none)",
+                )
+            console.print(table)
+            console.print(f"\nMerkle roots:     {len(data['merkle_roots'])}")
+            console.print(f"Inclusion proofs: {len(data['inclusion_proofs'])}")
+            console.print(f"Date range:       {start} to {end}")
+            console.print(f"Decision sample:  n={decision_sample} per model")
+            if signer_name:
+                console.print(f"Signer:           {signer_name}")
+            else:
+                console.print("[yellow]Signer:           (none — attestations will be unsigned)[/yellow]")
+            if upload:
+                console.print(f"Upload target:    {upload}")
+                console.print(f"Pre-sign expiry:  {presign_expiry}")
+            console.print("\n[dim]Remove --dry-run to build the export.[/dim]")
+            return
+
+        # --- Build signer ---
+        signer_obj = None
+        if signer_name:
+            signer_obj = _resolve_signer(signer_name, key_path)
+            console.print(f"Signing attestations with: [bold]{signer_name}[/bold]")
+
+        # --- Scope + builder ---
         scope = ExportScope(
             models=model_list,
             date_start=start,
@@ -2227,186 +2523,20 @@ def portal_export(
         if not created_by:
             created_by = os.environ.get("USER", getpass.getuser())
 
-        builder = ExportBuilder(scope=scope, created_by=created_by)
+        builder = ExportBuilder(
+            scope=scope, created_by=created_by, signer=signer_obj
+        )
 
-        # --- Resolve evidence backend ---
-        try:
-            ev_backend, _, _ = _build_evidence_backend(
-                project,
-                backend_flag=evidence_backend,
-                bucket_flag=evidence_bucket,
-                retention_flag=None,
-            )
-        except (typer.Exit, Exception) as exc:
-            console.print(
-                f"[yellow]Warning: could not load evidence backend: {exc}. "
-                f"Continuing with empty evidence.[/yellow]"
-            )
-            ev_backend = None
+        # Populate builder from collected data.
+        for mname, mdata in data["models"].items():
+            builder.add_evidence_packets(mname, mdata["packets"])
+            if mdata["decision_records"]:
+                builder.add_decision_records(mname, mdata["decision_records"])
+            for std_name, report_text in mdata["reports"].items():
+                builder.add_compliance_report(mname, std_name, report_text)
 
-        # --- Collect evidence packets per model ---
-        merkle_roots_all: list = []
-        all_leaf_hashes: Dict[str, list] = {}  # epoch -> [content_hash, ...]
-
-        for model_name in model_list:
-            console.print(f"Collecting evidence for [bold]{model_name}[/bold]...")
-
-            # Evidence packets — list_packets returns metadata only,
-            # so we retrieve full packet bodies via retrieve().
-            packets: list = []
-            if ev_backend is not None:
-                try:
-                    packet_metas = ev_backend.list_packets(
-                        model_name=model_name,
-                        start_date=start,
-                        end_date=end,
-                    )
-                    # list_packets returns descending; reverse to
-                    # chronological so the hash chain is in append order.
-                    for meta in reversed(packet_metas or []):
-                        uri = meta.get("uri")
-                        if uri:
-                            try:
-                                full_packet = ev_backend.retrieve(uri)
-                                packets.append(full_packet.to_dict())
-                            except Exception:
-                                # Fall back to metadata if retrieval fails
-                                packets.append(meta)
-                        else:
-                            packets.append(meta)
-                except Exception as exc:
-                    console.print(
-                        f"  [yellow]Could not load packets: {exc}[/yellow]"
-                    )
-
-            builder.add_evidence_packets(model_name, packets)
-            console.print(f"  {len(packets)} evidence packet(s)")
-
-            # Collect leaf hashes for inclusion proofs (keyed by epoch)
-            for pkt in packets:
-                ts = pkt.get("timestamp", "")[:10]  # YYYY-MM-DD
-                if ts:
-                    all_leaf_hashes.setdefault(ts, []).append(
-                        pkt.get("content_hash", "")
-                    )
-
-            # Decision records
-            if include_decisions:
-                try:
-                    replay_be = _load_replay_backend(
-                        profile, replay_backend, replay_bucket
-                    )
-                    records = replay_be.sample(
-                        model_name=model_name, since=start, until=end, n=10000
-                    )
-                    record_dicts = [
-                        r.model_dump(mode="json")
-                        if hasattr(r, "model_dump")
-                        else r.dict()
-                        for r in records
-                    ]
-                    builder.add_decision_records(model_name, record_dicts)
-                    console.print(f"  {len(record_dicts)} decision record(s)")
-                except Exception as exc:
-                    console.print(
-                        f"  [yellow]Could not load decision records: {exc}[/yellow]"
-                    )
-
-            # Compliance reports (generate for each requested standard)
-            report_standards = standard_list or []
-            if not report_standards:
-                # Try to discover available standards from the project
-                try:
-                    from mrm.compliance.registry import compliance_registry
-
-                    compliance_registry.load_builtin_standards()
-                    report_standards = list(compliance_registry.list_standards())
-                except Exception:
-                    pass
-
-            for std_name in report_standards:
-                try:
-                    from mrm.compliance.report_generator import (
-                        generate_compliance_report,
-                    )
-
-                    model_configs = project.select_models(models=model_name)
-                    if model_configs:
-                        mc = model_configs[0]
-                        runner = TestRunner(
-                            project.config, project.backend, project.catalog
-                        )
-                        results = runner.run_tests([mc])
-                        model_results = results.get(model_name, {})
-                        test_results = model_results.get("test_results", {})
-
-                        report_text = generate_compliance_report(
-                            standard_name=std_name,
-                            model_name=model_name,
-                            model_config=mc,
-                            test_results=test_results,
-                            trigger_events=[],
-                        )
-                        builder.add_compliance_report(
-                            model_name, std_name, report_text
-                        )
-                        console.print(f"  Generated {std_name} report")
-                except Exception as exc:
-                    console.print(
-                        f"  [yellow]Could not generate {std_name} report: {exc}[/yellow]"
-                    )
-
-        # --- Merkle roots ---
-        try:
-            roots_dir = PathLib(
-                project.root_path / "evidence" / "roots"
-            )
-            if roots_dir.exists():
-                from mrm.evidence.merkle import read_root
-
-                for root_file in sorted(roots_dir.glob("*.root.json")):
-                    epoch = root_file.stem.replace(".root", "")
-                    if start <= epoch <= end:
-                        try:
-                            root = read_root(roots_dir, epoch)
-                            merkle_roots_all.append(root.to_dict())
-                        except Exception:
-                            pass
-
-            builder.add_merkle_roots(merkle_roots_all)
-            if merkle_roots_all:
-                console.print(
-                    f"  {len(merkle_roots_all)} Merkle root(s)"
-                )
-        except Exception as exc:
-            console.print(
-                f"  [yellow]Could not load Merkle roots: {exc}[/yellow]"
-            )
-            builder.add_merkle_roots([])
-
-        # --- Inclusion proofs ---
-        inclusion_proofs: list = []
-        try:
-            from mrm.portal.merkle_proof import build_inclusion_proof
-
-            for epoch, hashes in all_leaf_hashes.items():
-                valid_hashes = [h for h in hashes if h and len(h) == 64]
-                for idx, h in enumerate(valid_hashes):
-                    try:
-                        proof = build_inclusion_proof(
-                            valid_hashes, idx, f"pkt-{idx}", epoch
-                        )
-                        inclusion_proofs.append(proof.to_dict())
-                    except Exception:
-                        pass
-        except Exception as exc:
-            console.print(
-                f"  [yellow]Could not build inclusion proofs: {exc}[/yellow]"
-            )
-
-        builder.add_inclusion_proofs(inclusion_proofs)
-        if inclusion_proofs:
-            console.print(f"  {len(inclusion_proofs)} inclusion proof(s)")
+        builder.add_merkle_roots(data["merkle_roots"])
+        builder.add_inclusion_proofs(data["inclusion_proofs"])
 
         # --- Build ZIP ---
         output_path = PathLib(output)
@@ -2417,13 +2547,22 @@ def portal_export(
         console.print(f"  Models:    {', '.join(model_list)}")
         console.print(f"  Range:     {start} to {end}")
         console.print(f"  Size:      {output_path.stat().st_size:,} bytes")
-        console.print(
-            f"\nDeliver [bold]{output_path.name}[/bold] to the regulator. "
-            f"They run:"
-        )
-        console.print(f"  unzip {output_path.name}")
-        console.print(f"  cd riskattest-export-*")
-        console.print(f"  python verify_export.py")
+        if signer_obj:
+            console.print(f"  Signed by: {signer_name}")
+
+        # --- Upload to S3 with pre-signed URL ---
+        if upload:
+            _upload_export_to_s3(
+                output_path, upload, presign_expiry, builder.export_id
+            )
+        else:
+            console.print(
+                f"\nDeliver [bold]{output_path.name}[/bold] to the regulator. "
+                f"They run:"
+            )
+            console.print(f"  unzip {output_path.name}")
+            console.print(f"  cd riskattest-export-*")
+            console.print(f"  python verify_export.py")
 
     except typer.Exit:
         raise
@@ -2436,6 +2575,74 @@ def portal_export(
 
         traceback.print_exc()
         raise typer.Exit(1)
+
+
+def _parse_expiry(expiry_str: str) -> int:
+    """Parse a human-friendly expiry like '7d', '24h', '3600s' to seconds."""
+    s = expiry_str.strip().lower()
+    if s.endswith("d"):
+        return int(s[:-1]) * 86400
+    if s.endswith("h"):
+        return int(s[:-1]) * 3600
+    if s.endswith("s"):
+        return int(s[:-1])
+    return int(s)
+
+
+def _upload_export_to_s3(
+    zip_path: Path,
+    s3_uri: str,
+    presign_expiry: str,
+    export_id: str,
+) -> None:
+    """Upload a ZIP to S3 and print a pre-signed download URL."""
+    try:
+        import boto3
+    except ImportError:
+        console.print(
+            "S3 upload requires boto3: pip install boto3", style="red"
+        )
+        raise typer.Exit(1)
+
+    # Parse s3://bucket/prefix
+    if not s3_uri.startswith("s3://"):
+        console.print(f"Invalid S3 URI: {s3_uri}", style="red")
+        raise typer.Exit(1)
+
+    parts = s3_uri[5:].split("/", 1)
+    bucket = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+
+    key = f"{prefix}riskattest-export-{export_id}.zip"
+
+    console.print(f"\nUploading to s3://{bucket}/{key} ...")
+    s3 = boto3.client("s3")
+    s3.upload_file(str(zip_path), bucket, key)
+    console.print(f"[green]Uploaded.[/green]")
+
+    # Generate pre-signed URL.
+    expiry_seconds = _parse_expiry(presign_expiry)
+    max_s3 = 604800  # 7 days
+    if expiry_seconds > max_s3:
+        console.print(
+            f"[yellow]S3 pre-signed URLs max out at 7 days; "
+            f"clamping {presign_expiry} to 7d.[/yellow]"
+        )
+        expiry_seconds = max_s3
+
+    url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expiry_seconds,
+    )
+    console.print(f"\n[bold]Pre-signed download URL[/bold] (expires in {presign_expiry}):")
+    console.print(f"  {url}")
+    console.print(
+        f"\nSend this URL to the regulator. They download, unzip, "
+        f"and run [bold]python verify_export.py[/bold]."
+    )
 
 
 @portal_app.command("list-exports")

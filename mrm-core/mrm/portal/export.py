@@ -265,6 +265,14 @@ class ExportBuilder:
         content = json.dumps({"proofs": proofs}, indent=2, sort_keys=True)
         self._files[path] = content.encode("utf-8")
 
+    def _sign_attestation(self, att: Attestation) -> None:
+        """Sign an attestation in place using the configured signer."""
+        if self.signer is None:
+            return
+        att.signer = getattr(self.signer, "name", "unknown")
+        payload = _canonical_json(att.to_signable_dict()).encode("utf-8")
+        att.signature = self.signer.sign_bytes(payload)
+
     def _build_attestations(self) -> None:
         """Build and sign compliance summary and chain integrity attestations."""
         timestamp = _utc_now()
@@ -277,15 +285,7 @@ class ExportBuilder:
             models={},  # Populated by caller or left as summary.
         )
         compliance_att.content_hash = compliance_att.compute_content_hash()
-
-        if self.signer:
-            signed_bytes = _canonical_json(compliance_att.to_signable_dict()).encode("utf-8")
-            compliance_att.signer = getattr(self.signer, "name", "local")
-            # Use signer's sign_bytes method if available.
-            if hasattr(self.signer, "sign_bytes"):
-                compliance_att.signature = self.signer.sign_bytes(signed_bytes)
-            else:
-                compliance_att.signature = None
+        self._sign_attestation(compliance_att)
 
         path = "attestations/compliance_summary.json"
         content = json.dumps(compliance_att.to_dict(), indent=2, sort_keys=True)
@@ -299,14 +299,7 @@ class ExportBuilder:
             models={},
         )
         chain_att.content_hash = chain_att.compute_content_hash()
-
-        if self.signer:
-            signed_bytes = _canonical_json(chain_att.to_signable_dict()).encode("utf-8")
-            chain_att.signer = getattr(self.signer, "name", "local")
-            if hasattr(self.signer, "sign_bytes"):
-                chain_att.signature = self.signer.sign_bytes(signed_bytes)
-            else:
-                chain_att.signature = None
+        self._sign_attestation(chain_att)
 
         path = "attestations/chain_integrity.json"
         content = json.dumps(chain_att.to_dict(), indent=2, sort_keys=True)
