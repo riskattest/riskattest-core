@@ -348,7 +348,7 @@ class Project:
         binding (host/token/catalog/schema) in the active target of
         ``profiles.yml``. The resolver applies the dbt-style merge.
         """
-        from mrm.core.references import ModelRef
+        from mrm.core.catalog import ModelRef
 
         models = self.list_models()
         self._catalog = ModelCatalog.from_project(models)

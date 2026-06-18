@@ -82,6 +82,27 @@ class Signer(abc.ABC):
     def verify(self, root: DailyMerkleRoot) -> bool:
         """Return True iff ``root.signature`` is valid for ``root``."""
 
+    def sign_bytes(self, data: bytes) -> str:
+        """Sign arbitrary bytes and return the signature as a hex/base64 string.
+
+        Default implementation wraps ``sign()`` by building a
+        ``DailyMerkleRoot`` proxy whose ``signed_bytes()`` returns *data*,
+        signs it, and returns the ``signature`` field.  Subclasses may
+        override for efficiency.
+        """
+        from dataclasses import replace
+
+        proxy = DailyMerkleRoot(
+            epoch="__proxy__",
+            root_hash="00" * 32,
+            leaf_count=0,
+            sessions=[],
+        )
+        # Monkey-patch signed_bytes so the signer hashes *data* instead.
+        proxy.signed_bytes = lambda: data  # type: ignore[assignment]
+        signed = self.sign(proxy)
+        return signed.signature or ""
+
     def describe(self) -> str:
         return f"{self.name} (HSM={self.requires_hsm})"
 
