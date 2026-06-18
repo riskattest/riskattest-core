@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RiskAttest — dbt for Model Risk Management</title>
+  <meta name="description" content="Validate every AI and traditional financial model against APRA CPS 230, Fed SR 26-2, EU AI Act, and OSFI E-23. Hash-chained evidence. 1:1 decision replay. Built by practitioners from Tier-1 banks." />
+  <meta property="og:title" content="RiskAttest — dbt for Model Risk Management" />
+  <meta property="og:description" content="Declarative YAML + CLI for model risk management. Hash-chained evidence. Cryptographic decision replay. Four jurisdictions bundled." />
+  <meta property="og:url" content="https://riskattest.com" />
+
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --navy:    #0D1B2A;
+      --navy2:   #132433;
+      --teal:    #0A6E73;
+      --teal2:   #12959C;
+      --seafoam: #17BEBB;
+      --white:   #FFFFFF;
+      --offwhite:#F0F4F5;
+      --muted:   #8BAAB0;
+      --card:    #1A2E3D;
+      --border:  rgba(18,149,156,0.25);
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--navy);
+      color: var(--white);
+      line-height: 1.6;
+    }
+    a { color: var(--seafoam); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Layout ── */
+    .container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+    section { padding: 80px 0; }
+    section:nth-child(even) { background: var(--navy2); }
+
+    /* ── Nav ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(13,27,42,0.95);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 0;
+    }
+    nav .inner {
+      max-width: 960px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .logo {
+      font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em;
+      color: var(--white);
+    }
+    .logo span { color: var(--seafoam); }
+    nav ul { list-style: none; display: flex; gap: 24px; }
+    nav ul li a {
+      font-size: 0.875rem; color: var(--muted); font-weight: 500;
+      transition: color 0.2s;
+    }
+    nav ul li a:hover { color: var(--seafoam); text-decoration: none; }
+
+    /* ── Hero ── */
+    #hero {
+      padding: 100px 0 80px;
+      background: var(--navy);
+      position: relative; overflow: hidden;
+    }
+    #hero::before {
+      content: '';
+      position: absolute; top: -120px; right: -120px;
+      width: 520px; height: 520px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(10,110,115,0.25) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .eyebrow {
+      display: inline-block;
+      font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--seafoam);
+      background: rgba(23,190,187,0.12);
+      border: 1px solid rgba(23,190,187,0.3);
+      padding: 5px 12px; border-radius: 4px; margin-bottom: 24px;
+    }
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.2rem);
+      font-weight: 800; line-height: 1.15; letter-spacing: -0.03em;
+      margin-bottom: 20px;
+    }
+    h1 .accent { color: var(--seafoam); }
+    .hero-sub {
+      font-size: 1.1rem; color: var(--muted); max-width: 620px;
+      margin-bottom: 36px; line-height: 1.7;
+    }
+    .hero-badges {
+      display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 40px;
+    }
+    .badge {
+      font-size: 0.8rem; font-weight: 600; padding: 5px 12px;
+      border-radius: 4px; border: 1px solid var(--border);
+      color: var(--seafoam); background: rgba(10,110,115,0.1);
+      font-family: 'Courier New', monospace;
+    }
+    .hero-ctas { display: flex; flex-wrap: wrap; gap: 14px; }
+    .btn-primary {
+      display: inline-block; padding: 13px 28px;
+      background: var(--teal); color: var(--white);
+      border-radius: 6px; font-weight: 700; font-size: 0.95rem;
+      border: none; cursor: pointer; transition: background 0.2s, transform 0.1s;
+      text-decoration: none;
+    }
+    .btn-primary:hover { background: var(--teal2); text-decoration: none; transform: translateY(-1px); }
+    .btn-secondary {
+      display: inline-block; padding: 13px 28px;
+      background: transparent; color: var(--seafoam);
+      border-radius: 6px; font-weight: 700; font-size: 0.95rem;
+      border: 1px solid var(--seafoam); cursor: pointer;
+      transition: background 0.2s, transform 0.1s; text-decoration: none;
+    }
+    .btn-secondary:hover { background: rgba(23,190,187,0.08); text-decoration: none; transform: translateY(-1px); }
+
+    /* ── Problem ── */
+    .problem-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px; margin-top: 48px;
+    }
+    .problem-card {
+      background: var(--card);
+      border: 1px solid var(--border); border-radius: 10px;
+      padding: 28px 24px;
+    }
+    .problem-card .icon { font-size: 1.5rem; margin-bottom: 14px; }
+    .problem-card h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: 10px; }
+    .problem-card p { font-size: 0.9rem; color: var(--muted); line-height: 1.65; }
+
+    /* ── Section headings ── */
+    .section-label {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--seafoam); margin-bottom: 12px;
+    }
+    h2 {
+      font-size: clamp(1.5rem, 3.5vw, 2.1rem);
+      font-weight: 800; letter-spacing: -0.02em; line-height: 1.25;
+      margin-bottom: 16px;
+    }
+    .section-sub { font-size: 1rem; color: var(--muted); max-width: 600px; }
+
+    /* ── Regulatory table ── */
+    .reg-table-wrap { overflow-x: auto; margin-top: 40px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th {
+      background: var(--teal); color: var(--white);
+      padding: 12px 16px; text-align: left; font-weight: 700;
+    }
+    td { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--muted); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(23,190,187,0.04); }
+    .status { font-weight: 700; }
+    .status-live    { color: #10B981; }
+    .status-soon    { color: #F59E0B; }
+    .status-flight  { color: #60A5FA; }
+    .status-upcoming{ color: var(--muted); }
+
+    /* ── Features ── */
+    .features-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 20px; margin-top: 48px;
+    }
+    .feature-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 24px 20px;
+    }
+    .feature-card .fi { font-size: 1.3rem; margin-bottom: 12px; }
+    .feature-card h3 { font-size: 0.95rem; font-weight: 700; margin-bottom: 8px; }
+    .feature-card p { font-size: 0.85rem; color: var(--muted); line-height: 1.65; }
+
+    /* ── Code block ── */
+    .code-wrap {
+      margin-top: 40px;
+      background: #0A1520; border: 1px solid var(--border);
+      border-radius: 10px; overflow: hidden;
+    }
+    .code-header {
+      background: rgba(23,190,187,0.08); padding: 10px 18px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8rem; color: var(--muted); font-family: monospace;
+    }
+    pre {
+      padding: 24px 20px; overflow-x: auto; font-size: 0.83rem;
+      line-height: 1.7; font-family: 'Courier New', monospace;
+    }
+    .kw  { color: #17BEBB; }
+    .val { color: #FCD34D; }
+    .cmt { color: #4B6E78; }
+    .cmd { color: #A5F3FC; }
+
+    /* ── Email capture sections ── */
+    .dual-capture {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 28px;
+      margin-top: 48px;
+    }
+    @media (max-width: 640px) { .dual-capture { grid-template-columns: 1fr; } }
+    .capture-box {
+      background: var(--card); border-radius: 12px;
+      border: 1px solid var(--border); padding: 32px 28px;
+    }
+    .capture-box .cb-label {
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.14em;
+      text-transform: uppercase; margin-bottom: 10px;
+      padding: 4px 10px; border-radius: 4px; display: inline-block;
+    }
+    .cb-label-user     { color: #10B981; background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.3); }
+    .cb-label-investor { color: #60A5FA; background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.3); }
+    .capture-box h3 { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
+    .capture-box p  { font-size: 0.875rem; color: var(--muted); margin-bottom: 20px; line-height: 1.65; }
+    .form-row { display: flex; flex-direction: column; gap: 10px; }
+    input[type="text"], input[type="email"] {
+      width: 100%; padding: 11px 14px;
+      background: rgba(0,0,0,0.25); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--white); font-size: 0.9rem;
+      outline: none; transition: border-color 0.2s;
+    }
+    input::placeholder { color: rgba(139,170,176,0.5); }
+    input:focus { border-color: var(--seafoam); }
+    .btn-submit {
+      width: 100%; padding: 12px;
+      background: var(--teal); color: var(--white);
+      border: none; border-radius: 6px; font-size: 0.9rem; font-weight: 700;
+      cursor: pointer; transition: background 0.2s;
+    }
+    .btn-submit:hover { background: var(--teal2); }
+    .form-success {
+      display: none; text-align: center; padding: 14px;
+      background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3);
+      border-radius: 6px; color: #10B981; font-size: 0.875rem; font-weight: 600;
+    }
+
+    /* ── Optional feedback ── */
+    #feedback { padding: 60px 0; }
+    .feedback-inner {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 36px 32px; max-width: 640px; margin: 0 auto;
+    }
+    .feedback-toggle {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 20px; cursor: pointer;
+    }
+    .feedback-toggle input[type="checkbox"] {
+      width: 18px; height: 18px; accent-color: var(--seafoam); cursor: pointer;
+    }
+    .feedback-toggle label {
+      font-size: 0.95rem; color: var(--white); cursor: pointer; user-select: none;
+    }
+    .feedback-toggle label span { color: var(--muted); font-size: 0.85rem; }
+    #feedback-form { display: none; margin-top: 4px; }
+    textarea {
+      width: 100%; padding: 12px 14px; min-height: 110px;
+      background: rgba(0,0,0,0.25); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--white); font-size: 0.875rem;
+      font-family: inherit; resize: vertical; outline: none;
+      transition: border-color 0.2s; margin-bottom: 10px;
+    }
+    textarea:focus { border-color: var(--seafoam); }
+    select {
+      width: 100%; padding: 11px 14px; margin-bottom: 10px;
+      background: rgba(0,0,0,0.25); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--white); font-size: 0.875rem;
+      outline: none; cursor: pointer;
+    }
+    select option { background: var(--navy2); }
+
+    /* ── Comparison ── */
+    .compare-grid {
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px; margin-top: 40px;
+    }
+    @media (max-width: 640px) { .compare-grid { grid-template-columns: 1fr; } }
+    .compare-col {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 22px 18px;
+    }
+    .compare-col.highlight { border-color: var(--seafoam); }
+    .compare-col h4 {
+      font-size: 0.9rem; font-weight: 700; margin-bottom: 14px;
+      padding-bottom: 10px; border-bottom: 1px solid var(--border);
+    }
+    .compare-col.highlight h4 { color: var(--seafoam); }
+    .compare-item {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: 0.83rem; color: var(--muted); margin-bottom: 8px;
+    }
+    .ci-yes { color: #10B981; font-weight: 700; flex-shrink: 0; }
+    .ci-no  { color: #EF4444; font-weight: 700; flex-shrink: 0; }
+    .ci-part{ color: #F59E0B; font-weight: 700; flex-shrink: 0; }
+
+    /* ── Footer ── */
+    footer {
+      background: #080F17; padding: 40px 0;
+      border-top: 1px solid var(--border); text-align: center;
+    }
+    footer .logo { font-size: 1.1rem; margin-bottom: 8px; display: inline-block; }
+    footer p { font-size: 0.82rem; color: var(--muted); margin-top: 6px; }
+    footer a { color: var(--seafoam); }
+    .footer-links { display: flex; justify-content: center; gap: 20px; margin: 14px 0 0; }
+    .footer-links a { font-size: 0.82rem; color: var(--muted); }
+    .footer-links a:hover { color: var(--seafoam); }
+
+    /* ── Formspree success state ── */
+    .hidden { display: none !important; }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+      section { padding: 56px 0; }
+      nav ul { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── NAV ─────────────────────────────────────────────────────────────────── -->
+<nav>
+  <div class="inner">
+    <div class="logo">Risk<span>Attest</span></div>
+    <ul>
+      <li><a href="#problem">Problem</a></li>
+      <li><a href="#solution">Solution</a></li>
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#team">Team</a></li>
+      <li><a href="#get-access">Get access</a></li>
+      <li><a href="#investors">Investors</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ── HERO ─────────────────────────────────────────────────────────────────── -->
+<section id="hero">
+  <div class="container">
+    <div class="eyebrow">Pre-Seed · June 2026 · riskattest.com</div>
+    <h1>
+      dbt for <span class="accent">Model Risk Management.</span><br />
+      With cryptographic decision replay.
+    </h1>
+    <p class="hero-sub">
+      Validate every AI and traditional model against APRA CPS&nbsp;230, Fed SR&nbsp;26-2, EU AI Act, and OSFI E-23.
+      Hash-chained evidence. 1:1 replay. Built by practitioners from Tier-1 banks.
+    </p>
+    <div class="hero-badges">
+      <span class="badge">APRA CPS 230</span>
+      <span class="badge">Fed SR 26-2</span>
+      <span class="badge">EU AI Act</span>
+      <span class="badge">OSFI E-23</span>
+      <span class="badge">Apache 2.0 OSS</span>
+      <span class="badge">Python 3.9+</span>
+    </div>
+    <div class="hero-ctas">
+      <a href="https://github.com/riskattest/riskattest-core" target="_blank" rel="noopener" class="btn-primary">
+        View on GitHub →
+      </a>
+      <a href="#get-access" class="btn-secondary">Get early access</a>
+    </div>
+  </div>
+</section>
+
+<!-- ── PROBLEM ───────────────────────────────────────────────────────────────── -->
+<section id="problem">
+  <div class="container">
+    <div class="section-label">The Problem</div>
+    <h2>AI model governance is a spreadsheet held together with prayer.</h2>
+    <p class="section-sub">
+      Regulators (APRA, Fed, OSFI, EU AI Office) now expect banks to prove how every model decision
+      was made — on demand, across a multi-year retention window. The tooling to do that doesn't exist yet.
+    </p>
+    <div class="problem-grid">
+      <div class="problem-card">
+        <div class="icon">⚠️</div>
+        <h3>24% of banks still on MS Excel. 40% on fragile in-house tools.</h3>
+        <p>Deloitte 2025 EMEA MRM Survey (87 banks): only a third of banks have tooling that fully supports lifecycle automation or monitoring. Evidence is scattered, manual, and won't survive a regulator exam.</p>
+      </div>
+      <div class="problem-card">
+        <div class="icon">📋</div>
+        <h3>44% of banks only sometimes validate AI/ML. 12% never do.</h3>
+        <p>RMA 2024 MRM Survey: just 44% of banks with AI/ML tools said they always validate them. 12% said never. Regulators are about to close that gap — by force.</p>
+      </div>
+      <div class="problem-card">
+        <div class="icon">🤖</div>
+        <h3>Model inventories hit 1,000+ models. Tools have not kept up.</h3>
+        <p>Moody's/Risk.net 2026 survey (79 MRM leaders): all banks reported model growth. 1 in 5 commercial banks manages 1,000+ models. More than a third say current tools can't support monitoring at this scale.</p>
+      </div>
+    </div>
+    <p style="font-size:0.78rem;color:var(--muted);margin-top:16px;font-style:italic;">
+      Sources: Deloitte 2025 EMEA MRM Survey · RMA 2024 MRM Survey · Moody's/Risk.net 2026 Survey
+    </p>
+
+    <div class="reg-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Regulatory Event</th>
+            <th>Region</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>1 Jul 2025</td><td>APRA CPS 230 fully effective</td><td>AU</td><td class="status status-live">Live now</td></tr>
+          <tr><td>30 Apr 2026</td><td>APRA AI letter + CPS 230 AI amendments</td><td>AU</td><td class="status status-live">Live now</td></tr>
+          <tr><td>2 Aug 2026</td><td>EU AI Act fully applicable</td><td>EU</td><td class="status status-soon">Imminent</td></tr>
+          <tr><td>2026–2027</td><td>Fed SR 11-7 → SR 26-2 (AI activity logging mandate)</td><td>US</td><td class="status status-flight">In flight</td></tr>
+          <tr><td>1 May 2027</td><td>OSFI E-23 expanded to all FRFIs incl. insurers</td><td>CA</td><td class="status status-upcoming">Upcoming</td></tr>
+          <tr><td>2 Aug 2027</td><td>EU AI Act high-risk embedded system obligations</td><td>EU</td><td class="status status-upcoming">Upcoming</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── SOLUTION ──────────────────────────────────────────────────────────────── -->
+<section id="solution">
+  <div class="container">
+    <div class="section-label">The Solution</div>
+    <h2>Declare models in YAML. Run one command. Get regulator-ready evidence.</h2>
+    <p class="section-sub">
+      RiskAttest is the glue between your MLOps stack and your GRC platform — not a replacement for either.
+      Think dbt, but for model risk.
+    </p>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="fi">⌨️</div>
+        <h3>Declarative YAML + CLI</h3>
+        <p>Write models in YAML. <code>mrm test</code>, <code>mrm docs generate</code>, <code>mrm replay</code>. Same command works in dev (local) and prod (S3 + Object Lock). No notebooks required.</p>
+      </div>
+      <div class="feature-card">
+        <div class="fi">🔒</div>
+        <h3>Hash-Chained Evidence Vault</h3>
+        <p>Every EvidencePacket cryptographically chained. RFC-6962 Merkle daily roots. KMS / HSM signing. WORM-stored. Immutable from the moment of creation.</p>
+      </div>
+      <div class="feature-card">
+        <div class="fi">🔁</div>
+        <h3>1:1 Decision Replay</h3>
+        <p>Every model invocation captured as a DecisionRecord — inputs, model identity, inference params, output. Replayable byte-for-byte. OTLP-exportable to any SIEM.</p>
+      </div>
+      <div class="feature-card">
+        <div class="fi">🌏</div>
+        <h3>Four Jurisdictions, Bundled</h3>
+        <p>APRA CPS&nbsp;230 · Fed SR&nbsp;26-2 · EU AI Act Annex IV · OSFI E-23. Built-in, pluggable, with a 27-concept cross-standard crosswalk shipped.</p>
+      </div>
+      <div class="feature-card">
+        <div class="fi">🧬</div>
+        <h3>GenAI &amp; Traditional Models</h3>
+        <p>14 GenAI tests (hallucination, bias, toxicity, PII, drift) plus tabular, CCR Monte Carlo, and credit risk packs. Covers sklearn, MLflow, HuggingFace, LiteLLM, Databricks.</p>
+      </div>
+      <div class="feature-card">
+        <div class="fi">🔌</div>
+        <h3>Pluggable Architecture</h3>
+        <p>Custom compliance standards via <code>@register_standard</code>. Custom test packs via <code>@register_test</code>. Entry-point discovery. 6 Architecture Decision Records documenting every design choice.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── HOW IT WORKS ───────────────────────────────────────────────────────────── -->
+<section id="how">
+  <div class="container">
+    <div class="section-label">How It Works</div>
+    <h2>One YAML file. One CLI. Regulator-ready output.</h2>
+
+    <div class="code-wrap">
+      <div class="code-header">mrm_project.yml → mrm test → mrm evidence freeze → mrm docs generate</div>
+      <pre><span class="kw">models:</span>
+  - <span class="kw">name:</span> <span class="val">ccr_monte_carlo</span>
+    <span class="kw">tier:</span> <span class="val">tier_1</span>
+    <span class="kw">tests:</span>
+      - <span class="kw">test:</span> <span class="val">ccr.MCConvergence</span>
+        <span class="kw">params:</span> <span class="cmt">{ paths: 100000, tolerance: 1e-3 }</span>
+      - <span class="kw">test:</span> <span class="val">genai.HallucinationRate</span>
+        <span class="kw">compliance:</span>
+          <span class="kw">cps230:</span> <span class="val">["27", "28"]</span>
+          <span class="kw">sr26_2:</span> <span class="val">["III.A", "V.B"]</span>
+          <span class="kw">eu_ai_act:</span> <span class="val">["Annex IV §2.b"]</span>
+
+<span class="cmt"># Then run:</span>
+<span class="cmd">mrm test --select tier_1</span>
+<span class="cmd">mrm evidence freeze ccr_monte_carlo</span>
+<span class="cmd">mrm replay sample --model ccr_monte_carlo --n 50</span>
+<span class="cmd">mrm docs generate --compliance standard:cps230,sr26_2</span></pre>
+    </div>
+
+    <p style="font-size:0.9rem; color:var(--muted); margin-top:18px; font-style:italic;">
+      Same command in dev (local filesystem) and prod (S3 + Object Lock) — the active profile decides. No code changes across environments.
+    </p>
+  </div>
+</section>
+
+<!-- ── COMPARISON ─────────────────────────────────────────────────────────────── -->
+<section id="compare" style="background: var(--navy2);">
+  <div class="container">
+    <div class="section-label">Why RiskAttest</div>
+    <h2>No one does YAML + CLI + replay + multi-jurisdiction. We do.</h2>
+    <p class="section-sub" style="margin-bottom:28px;">ValidMind raised $11.1M (Point72 Ventures, 2024–26) proving the market is real. They went notebook-first. We went infrastructure-first — the same structural bet dbt made against spreadsheets.</p>
+    <div class="compare-grid">
+      <div class="compare-col highlight">
+        <h4>✦ RiskAttest</h4>
+        <div class="compare-item"><span class="ci-yes">✓</span> CLI + YAML + Git native</div>
+        <div class="compare-item"><span class="ci-yes">✓</span> GenAI / LLM test pack (14 tests)</div>
+        <div class="compare-item"><span class="ci-yes">✓</span> 1:1 Decision Replay</div>
+        <div class="compare-item"><span class="ci-yes">✓</span> Hash-chained evidence</div>
+        <div class="compare-item"><span class="ci-yes">✓</span> 5 jurisdictions bundled</div>
+        <div class="compare-item"><span class="ci-yes">✓</span> Open source core (Apache 2.0)</div>
+        <div class="compare-item"><span class="ci-yes">✓</span> CI/CD-compatible</div>
+      </div>
+      <div class="compare-col">
+        <h4>ValidMind</h4>
+        <div class="compare-item"><span class="ci-no">✗</span> No CLI or YAML interface</div>
+        <div class="compare-item"><span class="ci-part">~</span> Partial GenAI support</div>
+        <div class="compare-item"><span class="ci-no">✗</span> No decision replay</div>
+        <div class="compare-item"><span class="ci-no">✗</span> No cryptographic chaining</div>
+        <div class="compare-item"><span class="ci-part">~</span> Partial multi-jurisdiction</div>
+        <div class="compare-item"><span class="ci-no">✗</span> Closed source</div>
+        <div class="compare-item"><span class="ci-no">✗</span> Notebook-first (hard to CI/CD)</div>
+      </div>
+      <div class="compare-col">
+        <h4>OpenPages / Archer</h4>
+        <div class="compare-item"><span class="ci-no">✗</span> No CLI or YAML</div>
+        <div class="compare-item"><span class="ci-no">✗</span> No GenAI model support</div>
+        <div class="compare-item"><span class="ci-no">✗</span> No decision replay</div>
+        <div class="compare-item"><span class="ci-no">✗</span> No cryptographic chaining</div>
+        <div class="compare-item"><span class="ci-part">~</span> Partial jurisdiction mapping</div>
+        <div class="compare-item"><span class="ci-no">✗</span> Closed, expensive, slow to deploy</div>
+        <div class="compare-item"><span class="ci-no">✗</span> Pre-dates LLMs by design</div>
+      </div>
+    </div>
+    <p style="font-size:0.9rem;color:var(--muted);margin-top:20px;font-style:italic;">
+      Our structural wedge: YAML + CLI + Git is the interface that risk engineers and validators actually want.
+      ValidMind bet on notebooks. We bet on infrastructure — the same bet dbt made and won.
+    </p>
+  </div>
+</section>
+
+<!-- ── TEAM ──────────────────────────────────────────────────────────────────── -->
+<section id="team">
+  <div class="container">
+    <div class="section-label">The Team</div>
+    <h2>Built by practitioners who've lived the problem.</h2>
+    <p class="section-sub">Combined experience across quantitative finance, model risk management, product governance, and regulatory compliance at Tier-1 banks and global consultancies.</p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px;margin-top:40px;">
+
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:28px 24px;">
+        <div style="font-size:1.4rem;margin-bottom:14px;">⚙️</div>
+        <h3 style="font-size:1rem;font-weight:700;margin-bottom:8px;">Technical Co-Founder</h3>
+        <p style="font-size:0.88rem;color:var(--muted);line-height:1.65;margin-bottom:16px;">18 years quantitative finance and data engineering. Lead Analytics Engineer at a Tier-1 Australian bank. Built the full RiskAttest stack — CLI, cryptographic evidence vault, 1:1 decision replay, four bundled jurisdictions. RAI certified.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--seafoam);font-family:monospace;">Tier-1 Bank</span>
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--seafoam);font-family:monospace;">18yr Quant</span>
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--seafoam);font-family:monospace;">RAI Certified</span>
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--seafoam);font-family:monospace;">dbt · Python · APRA</span>
+        </div>
+      </div>
+
+      <div style="background:var(--card);border:1px solid rgba(18,149,156,0.5);border-radius:10px;padding:28px 24px;position:relative;">
+        <span style="position:absolute;top:16px;right:16px;font-size:0.72rem;font-weight:700;padding:3px 10px;border-radius:4px;background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.35);color:#10B981;">In Discussion</span>
+        <div style="font-size:1.4rem;margin-bottom:14px;">🏦</div>
+        <h3 style="font-size:1rem;font-weight:700;margin-bottom:8px;">Risk &amp; Partnerships Co-Founder</h3>
+        <p style="font-size:0.88rem;color:var(--muted);line-height:1.65;margin-bottom:16px;">15+ years in product governance, operational risk, and APRA compliance across global banks and consulting. Currently Senior Risk Management at a major Australian bank. The practitioner credibility and institutional network to open design partner doors.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--teal2);font-family:monospace;">ING · KPMG · CBA</span>
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--teal2);font-family:monospace;">NatWest</span>
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--teal2);font-family:monospace;">15yr Op Risk</span>
+          <span style="font-size:0.75rem;padding:3px 9px;border-radius:4px;border:1px solid var(--border);color:var(--teal2);font-family:monospace;">AGIA · APRA</span>
+        </div>
+      </div>
+
+    </div>
+
+    <p style="font-size:0.85rem;color:var(--muted);margin-top:20px;">
+      We are actively recruiting a Head of Compliance (GDPR + AI governance specialist) for post-seed. If that's you, <a href="mailto:founders@riskattest.com">get in touch</a>.
+    </p>
+  </div>
+</section>
+
+<!-- ── GET ACCESS (consumers) ─────────────────────────────────────────────────── -->
+<section id="get-access">
+  <div class="container">
+    <div class="section-label">Get Early Access</div>
+    <h2>Two paths in. One is free.</h2>
+    <p class="section-sub">
+      The OSS core is on GitHub now. Cloud early access is for teams who need managed evidence vaults,
+      HSM signing, and GRC connectors out of the box.
+    </p>
+
+    <div class="dual-capture">
+
+      <!-- Consumer / User capture -->
+      <div class="capture-box">
+        <span class="cb-label cb-label-user">For MRM &amp; Risk Teams</span>
+        <h3>Join the early access list</h3>
+        <p>Get notified when RiskAttest Cloud launches — managed evidence vault, GRC connectors (OpenPages, ServiceNow, Workiva), and HSM-backed signing. No spam. One email when it's ready.</p>
+        <form id="user-form" action="https://formspree.io/f/YOUR_USER_FORM_ID" method="POST">
+          <div class="form-row">
+            <input type="text" name="name" placeholder="Your name" required />
+            <input type="email" name="email" placeholder="Work email" required />
+            <input type="text" name="org" placeholder="Organisation (bank, insurer, fund...)" />
+            <input type="hidden" name="_subject" value="RiskAttest — User Early Access" />
+            <button type="submit" class="btn-submit">Join early access →</button>
+          </div>
+        </form>
+        <div class="form-success" id="user-success">
+          ✓ You're on the list. We'll reach out before launch.
+        </div>
+        <p style="font-size:0.78rem;color:var(--muted);margin-top:12px;">
+          Or go straight to the OSS core:
+          <a href="https://github.com/riskattest/riskattest-core" target="_blank">github.com/riskattest/riskattest-core</a>
+        </p>
+      </div>
+
+      <!-- Investor capture -->
+      <div class="capture-box">
+        <span class="cb-label cb-label-investor">For Investors</span>
+        <h3>Request the investor deck</h3>
+        <p>RiskAttest is raising a $750K pre-seed to build the cloud layer, GRC connectors, and HSM evidence vault. Working OSS product. 158 tests passing. Design partner pipeline open.</p>
+        <form id="investor-form" action="https://formspree.io/f/YOUR_INVESTOR_FORM_ID" method="POST">
+          <div class="form-row">
+            <input type="text" name="name" placeholder="Your name" required />
+            <input type="email" name="email" placeholder="Email" required />
+            <input type="text" name="fund" placeholder="Fund or firm name" />
+            <input type="hidden" name="_subject" value="RiskAttest — Investor Deck Request" />
+            <button type="submit" class="btn-submit" style="background: #1E3A8A;">Request deck →</button>
+          </div>
+        </form>
+        <div class="form-success" id="investor-success">
+          ✓ Request received. We'll send the deck within 24 hours.
+        </div>
+        <p style="font-size:0.78rem;color:var(--muted);margin-top:12px;">
+          Or email directly: <a href="mailto:founders@riskattest.com">founders@riskattest.com</a>
+        </p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── FEEDBACK (optional, not forced) ─────────────────────────────────────────── -->
+<section id="feedback" style="background: var(--navy2); padding: 56px 0;">
+  <div class="container">
+    <div style="text-align:center; margin-bottom: 28px;">
+      <div class="section-label" style="justify-content:center; display:flex;">Market Validation</div>
+      <h2 style="font-size:1.5rem;">Tell us what you're actually dealing with</h2>
+      <p style="font-size:0.9rem;color:var(--muted);max-width:520px;margin:8px auto 0;">
+        Completely optional. No email required. Your input directly shapes what we build next.
+      </p>
+    </div>
+    <div class="feedback-inner">
+      <div class="feedback-toggle">
+        <input type="checkbox" id="feedback-toggle" />
+        <label for="feedback-toggle">
+          Share anonymous feedback (optional) &nbsp;<span>— helps us build the right thing</span>
+        </label>
+      </div>
+
+      <form id="feedback-form" action="https://formspree.io/f/YOUR_FEEDBACK_FORM_ID" method="POST">
+        <select name="persona">
+          <option value="">I am a... (optional)</option>
+          <option>Model Risk Manager / Validator</option>
+          <option>Chief Risk Officer / Head of Model Risk</option>
+          <option>ML / AI Engineer at a bank or insurer</option>
+          <option>Compliance / Regulatory Affairs</option>
+          <option>VC / Investor</option>
+          <option>Other</option>
+        </select>
+        <select name="pain_point">
+          <option value="">Biggest pain point today? (optional)</option>
+          <option>Producing regulator-ready evidence under time pressure</option>
+          <option>Validating GenAI / LLM models — no good tooling</option>
+          <option>Managing multiple regulatory frameworks manually</option>
+          <option>No audit trail for model decisions</option>
+          <option>GRC suite too slow / doesn't understand AI</option>
+          <option>Something else</option>
+        </select>
+        <textarea name="feedback" placeholder="What would make you switch from your current approach? What's the gap we should fill first? Completely anonymous — no email collected here."></textarea>
+        <input type="hidden" name="_subject" value="RiskAttest — Anonymous Market Feedback" />
+        <button type="submit" class="btn-submit" style="background: var(--teal2);">Send feedback (anonymous) →</button>
+        <div class="form-success" id="feedback-success" style="margin-top:10px;">
+          ✓ Thank you. This goes directly to the product roadmap.
+        </div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ─────────────────────────────────────────────────────────────────── -->
+<footer>
+  <div class="container">
+    <div class="logo">Risk<span style="color:var(--seafoam)">Attest</span></div>
+    <p>dbt for Model Risk Management — with cryptographic decision replay.</p>
+    <p style="margin-top:6px;">Apache 2.0 open source core. Built by <a href="https://bosonresearch.com.au" target="_blank">Boson Research Advisory</a>.</p>
+    <div class="footer-links">
+      <a href="https://github.com/riskattest/riskattest-core" target="_blank">GitHub</a>
+      <a href="mailto:founders@riskattest.com">founders@riskattest.com</a>
+      <a href="#get-access">Early access</a>
+      <a href="#investors">Investors</a>
+    </div>
+    <p style="margin-top:18px;font-size:0.78rem;">© 2026 Boson Research Advisory Pty Ltd · riskattest.com</p>
+  </div>
+</footer>
+
+<script>
+  // ── Feedback toggle ─────────────────────────────────────────────────────────
+  document.getElementById('feedback-toggle').addEventListener('change', function() {
+    document.getElementById('feedback-form').style.display = this.checked ? 'block' : 'none';
+  });
+
+  // ── Form submissions via Formspree (AJAX) ──────────────────────────────────
+  function handleForm(formId, successId) {
+    const form = document.getElementById(formId);
+    if (!form) return;
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const data = new FormData(form);
+      try {
+        const resp = await fetch(form.action, {
+          method: 'POST', body: data,
+          headers: { 'Accept': 'application/json' }
+        });
+        if (resp.ok) {
+          form.style.display = 'none';
+          document.getElementById(successId).style.display = 'block';
+        } else {
+          alert('Something went wrong — please email founders@riskattest.com directly.');
+        }
+      } catch(_) {
+        alert('Network error — please email founders@riskattest.com directly.');
+      }
+    });
+  }
+
+  handleForm('user-form',      'user-success');
+  handleForm('investor-form',  'investor-success');
+  handleForm('feedback-form',  'feedback-success');
+
+  // ── Smooth scroll for anchors ────────────────────────────────────────────────
+  document.querySelectorAll('a[href^="#"]').forEach(a => {
+    a.addEventListener('click', e => {
+      const target = document.querySelector(a.getAttribute('href'));
+      if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth' }); }
+    });
+  });
+</script>
+
+</body>
+</html>

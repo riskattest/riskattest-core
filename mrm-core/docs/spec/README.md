@@ -29,3 +29,4 @@ Each spec carries:
 | [Decision Record](replay-record-v1.md) | v1 | Public Review (PRD-2) |
 | [Evidence Vault Chain](evidence-vault-v1.md) | v1 | Public Review (PRD-2) |
 | [Compliance Plugin Contract](compliance-plugin-v1.md) | v1 | Public Review (PRD-2) |
+| [Regulator Evidence Export](regulator-portal-v1.md) | v1 | Draft (PRD-1) |

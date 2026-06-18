@@ -1,5 +1,8 @@
 """Main CLI for MRM Core"""
 
+import sys
+import zipfile
+
 import typer
 from pathlib import Path
 from rich.console import Console
@@ -2123,6 +2126,675 @@ def replay_verify_chain(
     except Exception as e:
         console.print(f" Error verifying chain: {e}", style="red")
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# `mrm portal` — Regulator evidence export (regulator-portal-v1)
+# ---------------------------------------------------------------------------
+
+portal_app = typer.Typer(help="Self-verifying evidence export for regulators")
+app.add_typer(portal_app, name="portal")
+
+
+def _collect_export_data(
+    project,
+    model_list: List[str],
+    standard_list: Optional[List[str]],
+    start: str,
+    end: str,
+    include_decisions: bool,
+    decision_sample_n: int,
+    evidence_backend: Optional[str],
+    evidence_bucket: Optional[str],
+    replay_backend: Optional[str],
+    replay_bucket: Optional[str],
+    profile: str,
+) -> Dict[str, Any]:
+    """Gather evidence, decisions, reports, roots, and proofs.
+
+    Returns a summary dict used by both ``--dry-run`` and the real build.
+    """
+    from pathlib import Path as PathLib
+
+    summary: Dict[str, Any] = {
+        "models": {},
+        "merkle_roots": [],
+        "inclusion_proofs": [],
+        "ev_backend": None,
+    }
+
+    # --- Resolve evidence backend ---
+    ev_backend = None
+    try:
+        ev_backend, _, _ = _build_evidence_backend(
+            project,
+            backend_flag=evidence_backend,
+            bucket_flag=evidence_bucket,
+            retention_flag=None,
+        )
+        summary["ev_backend"] = ev_backend
+    except (typer.Exit, Exception) as exc:
+        console.print(
+            f"[yellow]Warning: could not load evidence backend: {exc}. "
+            f"Continuing with empty evidence.[/yellow]"
+        )
+
+    all_leaf_hashes: Dict[str, list] = {}  # epoch -> [content_hash, ...]
+
+    for model_name in model_list:
+        console.print(f"Collecting evidence for [bold]{model_name}[/bold]...")
+        model_data: Dict[str, Any] = {
+            "packets": [],
+            "decision_records": [],
+            "reports": {},
+        }
+
+        # --- Evidence packets ---
+        if ev_backend is not None:
+            try:
+                packet_metas = ev_backend.list_packets(
+                    model_name=model_name,
+                    start_date=start,
+                    end_date=end,
+                )
+                # list_packets returns descending; reverse to
+                # chronological so the hash chain is in append order.
+                for meta in reversed(packet_metas or []):
+                    uri = meta.get("uri")
+                    if uri:
+                        try:
+                            full_packet = ev_backend.retrieve(uri)
+                            model_data["packets"].append(full_packet.to_dict())
+                        except Exception:
+                            model_data["packets"].append(meta)
+                    else:
+                        model_data["packets"].append(meta)
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not load packets: {exc}[/yellow]"
+                )
+
+        console.print(f"  {len(model_data['packets'])} evidence packet(s)")
+
+        # Collect leaf hashes for inclusion proofs
+        for pkt in model_data["packets"]:
+            ts = pkt.get("timestamp", "")[:10]
+            if ts:
+                all_leaf_hashes.setdefault(ts, []).append(
+                    pkt.get("content_hash", "")
+                )
+
+        # --- Decision records (sampled) ---
+        if include_decisions:
+            try:
+                replay_be = _load_replay_backend(
+                    profile, replay_backend, replay_bucket
+                )
+                records = replay_be.sample(
+                    model_name=model_name,
+                    since=start,
+                    until=end,
+                    n=decision_sample_n,
+                )
+                model_data["decision_records"] = [
+                    r.model_dump(mode="json")
+                    if hasattr(r, "model_dump")
+                    else r.dict()
+                    for r in records
+                ]
+                console.print(
+                    f"  {len(model_data['decision_records'])} decision record(s)"
+                    + (f" (sampled, n={decision_sample_n})" if len(records) == decision_sample_n else "")
+                )
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not load decision records: {exc}[/yellow]"
+                )
+
+        # --- Compliance reports ---
+        report_standards = standard_list or []
+        if not report_standards:
+            try:
+                from mrm.compliance.registry import compliance_registry
+
+                compliance_registry.load_builtin_standards()
+                report_standards = list(compliance_registry.list_standards())
+            except Exception:
+                pass
+
+        # Run tests once per model (not per standard)
+        test_results: Dict[str, Any] = {}
+        model_configs = project.select_models(models=model_name)
+        if model_configs and report_standards:
+            mc = model_configs[0]
+            try:
+                runner = TestRunner(
+                    project.config, project.backend, project.catalog
+                )
+                results = runner.run_tests([mc])
+                model_results = results.get(model_name, {})
+                test_results = model_results.get("test_results", {})
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not run tests: {exc}[/yellow]"
+                )
+
+        for std_name in report_standards:
+            try:
+                from mrm.compliance.report_generator import (
+                    generate_compliance_report,
+                )
+
+                if model_configs:
+                    report_text = generate_compliance_report(
+                        standard_name=std_name,
+                        model_name=model_name,
+                        model_config=model_configs[0],
+                        test_results=test_results,
+                        trigger_events=[],
+                    )
+                    model_data["reports"][std_name] = report_text
+                    console.print(f"  Generated {std_name} report")
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Could not generate {std_name} report: {exc}[/yellow]"
+                )
+
+        summary["models"][model_name] = model_data
+
+    # --- Merkle roots ---
+    merkle_roots: list = []
+    try:
+        roots_dir = PathLib(project.root_path / "evidence" / "roots")
+        if roots_dir.exists():
+            from mrm.evidence.merkle import read_root
+
+            for root_file in sorted(roots_dir.glob("*.root.json")):
+                epoch = root_file.stem.replace(".root", "")
+                if start <= epoch <= end:
+                    try:
+                        root = read_root(roots_dir, epoch)
+                        merkle_roots.append(root.to_dict())
+                    except Exception:
+                        pass
+        if merkle_roots:
+            console.print(f"  {len(merkle_roots)} Merkle root(s)")
+    except Exception as exc:
+        console.print(
+            f"  [yellow]Could not load Merkle roots: {exc}[/yellow]"
+        )
+    summary["merkle_roots"] = merkle_roots
+
+    # --- Inclusion proofs ---
+    inclusion_proofs: list = []
+    try:
+        from mrm.portal.merkle_proof import build_inclusion_proof as _bip
+
+        for epoch, hashes in all_leaf_hashes.items():
+            valid_hashes = [h for h in hashes if h and len(h) == 64]
+            for idx, _h in enumerate(valid_hashes):
+                try:
+                    proof = _bip(valid_hashes, idx, f"pkt-{idx}", epoch)
+                    inclusion_proofs.append(proof.to_dict())
+                except Exception:
+                    pass
+    except Exception as exc:
+        console.print(
+            f"  [yellow]Could not build inclusion proofs: {exc}[/yellow]"
+        )
+    if inclusion_proofs:
+        console.print(f"  {len(inclusion_proofs)} inclusion proof(s)")
+    summary["inclusion_proofs"] = inclusion_proofs
+
+    return summary
+
+
+@portal_app.command("export")
+def portal_export(
+    models: str = typer.Option(
+        ..., "--models", "-m",
+        help="Comma-separated model names to include",
+    ),
+    start: str = typer.Option(
+        ..., "--start", "-s",
+        help="Date range start (YYYY-MM-DD)",
+    ),
+    end: str = typer.Option(
+        ..., "--end", "-e",
+        help="Date range end (YYYY-MM-DD)",
+    ),
+    standards: Optional[str] = typer.Option(
+        None, "--standards",
+        help="Comma-separated standards (default: all)",
+    ),
+    output: str = typer.Option(
+        "export.zip", "--output", "-o",
+        help="Output ZIP file path",
+    ),
+    created_by: Optional[str] = typer.Option(
+        None, "--created-by",
+        help="User identifier (email)",
+    ),
+    include_decisions: bool = typer.Option(
+        True, "--decisions/--no-decisions",
+        help="Include decision records",
+    ),
+    decision_sample: int = typer.Option(
+        500, "--decision-sample", "-n",
+        help="Max decision records per model (statistical sample)",
+    ),
+    signer_name: Optional[str] = typer.Option(
+        None, "--signer",
+        help="Sign attestations: local | gpg | age | kms",
+    ),
+    key_path: Optional[str] = typer.Option(
+        None, "--key-path",
+        help="Key file for local signer",
+    ),
+    upload: Optional[str] = typer.Option(
+        None, "--upload",
+        help="Upload to S3 and generate pre-signed URL (s3://bucket/prefix)",
+    ),
+    presign_expiry: str = typer.Option(
+        "7d", "--presign-expiry",
+        help="Pre-signed URL expiry (e.g. 7d, 24h, 3600s)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Preview what would be included without building the ZIP",
+    ),
+    evidence_backend: Optional[str] = typer.Option(
+        None, "--evidence-backend",
+        help="Override evidence backend type (local | s3)",
+    ),
+    evidence_bucket: Optional[str] = typer.Option(
+        None, "--evidence-bucket",
+        help="Override evidence S3 bucket",
+    ),
+    replay_backend: Optional[str] = typer.Option(
+        None, "--replay-backend",
+        help="Override replay backend type (local | s3)",
+    ),
+    replay_bucket: Optional[str] = typer.Option(
+        None, "--replay-bucket",
+        help="Override replay S3 bucket",
+    ),
+    profile: str = typer.Option(
+        "dev", "--profile", "-p",
+        help="Profile to use",
+    ),
+):
+    """Build a self-verifying evidence export ZIP for regulators.
+
+    The export contains evidence packets, decision records, compliance
+    reports, Merkle roots, inclusion proofs, signed attestations, and a
+    zero-dependency verify_export.py script the regulator runs to verify
+    everything with ``python verify_export.py``.
+
+    Examples:
+
+        mrm portal export --models ccr_monte_carlo --start 2025-07-01 --end 2026-06-18
+
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --standards cps230 --signer local --key-path evidence/signer.key
+
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --upload s3://my-bucket/exports/ --presign-expiry 7d
+
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --dry-run
+
+        mrm portal export -m ccr_monte_carlo -s 2025-07-01 -e 2026-06-18 --decision-sample 100
+    """
+    import getpass
+    import os
+    from pathlib import Path as PathLib
+
+    from mrm.portal.export import ExportBuilder, ExportScope
+
+    try:
+        project = Project.load(profile=profile)
+
+        model_list = [m.strip() for m in models.split(",")]
+        standard_list = (
+            [s.strip() for s in standards.split(",")]
+            if standards
+            else None
+        )
+
+        # --- Collect all data ---
+        data = _collect_export_data(
+            project=project,
+            model_list=model_list,
+            standard_list=standard_list,
+            start=start,
+            end=end,
+            include_decisions=include_decisions,
+            decision_sample_n=decision_sample,
+            evidence_backend=evidence_backend,
+            evidence_bucket=evidence_bucket,
+            replay_backend=replay_backend,
+            replay_bucket=replay_bucket,
+            profile=profile,
+        )
+
+        # --- Dry-run: just print summary ---
+        if dry_run:
+            console.print("\n[bold cyan]--- DRY RUN (no ZIP created) ---[/bold cyan]\n")
+            table = Table(title="Export Preview", show_header=True)
+            table.add_column("Model", style="cyan")
+            table.add_column("Evidence Packets", justify="right")
+            table.add_column("Decision Records", justify="right")
+            table.add_column("Compliance Reports")
+            for mname, mdata in data["models"].items():
+                table.add_row(
+                    mname,
+                    str(len(mdata["packets"])),
+                    str(len(mdata["decision_records"])),
+                    ", ".join(mdata["reports"].keys()) or "(none)",
+                )
+            console.print(table)
+            console.print(f"\nMerkle roots:     {len(data['merkle_roots'])}")
+            console.print(f"Inclusion proofs: {len(data['inclusion_proofs'])}")
+            console.print(f"Date range:       {start} to {end}")
+            console.print(f"Decision sample:  n={decision_sample} per model")
+            if signer_name:
+                console.print(f"Signer:           {signer_name}")
+            else:
+                console.print("[yellow]Signer:           (none — attestations will be unsigned)[/yellow]")
+            if upload:
+                console.print(f"Upload target:    {upload}")
+                console.print(f"Pre-sign expiry:  {presign_expiry}")
+            console.print("\n[dim]Remove --dry-run to build the export.[/dim]")
+            return
+
+        # --- Build signer ---
+        signer_obj = None
+        if signer_name:
+            signer_obj = _resolve_signer(signer_name, key_path)
+            console.print(f"Signing attestations with: [bold]{signer_name}[/bold]")
+
+        # --- Scope + builder ---
+        scope = ExportScope(
+            models=model_list,
+            date_start=start,
+            date_end=end,
+            standards=standard_list,
+            include_decision_records=include_decisions,
+        )
+
+        if not created_by:
+            created_by = os.environ.get("USER", getpass.getuser())
+
+        builder = ExportBuilder(
+            scope=scope, created_by=created_by, signer=signer_obj
+        )
+
+        # Populate builder from collected data.
+        for mname, mdata in data["models"].items():
+            builder.add_evidence_packets(mname, mdata["packets"])
+            if mdata["decision_records"]:
+                builder.add_decision_records(mname, mdata["decision_records"])
+            for std_name, report_text in mdata["reports"].items():
+                builder.add_compliance_report(mname, std_name, report_text)
+
+        builder.add_merkle_roots(data["merkle_roots"])
+        builder.add_inclusion_proofs(data["inclusion_proofs"])
+
+        # --- Build ZIP ---
+        output_path = PathLib(output)
+        builder.build(output_path)
+
+        console.print(f"\n[green]Export created: {output_path}[/green]")
+        console.print(f"  Export ID: {builder.export_id}")
+        console.print(f"  Models:    {', '.join(model_list)}")
+        console.print(f"  Range:     {start} to {end}")
+        console.print(f"  Size:      {output_path.stat().st_size:,} bytes")
+        if signer_obj:
+            console.print(f"  Signed by: {signer_name}")
+
+        # --- Upload to S3 with pre-signed URL ---
+        if upload:
+            _upload_export_to_s3(
+                output_path, upload, presign_expiry, builder.export_id
+            )
+        else:
+            console.print(
+                f"\nDeliver [bold]{output_path.name}[/bold] to the regulator. "
+                f"They run:"
+            )
+            console.print(f"  unzip {output_path.name}")
+            console.print(f"  cd riskattest-export-*")
+            console.print(f"  python verify_export.py")
+
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        console.print(f" {e}", style="red")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f" Error building export: {e}", style="red")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+
+def _parse_expiry(expiry_str: str) -> int:
+    """Parse a human-friendly expiry like '7d', '24h', '3600s' to seconds."""
+    s = expiry_str.strip().lower()
+    if s.endswith("d"):
+        return int(s[:-1]) * 86400
+    if s.endswith("h"):
+        return int(s[:-1]) * 3600
+    if s.endswith("s"):
+        return int(s[:-1])
+    return int(s)
+
+
+def _upload_export_to_s3(
+    zip_path: Path,
+    s3_uri: str,
+    presign_expiry: str,
+    export_id: str,
+) -> None:
+    """Upload a ZIP to S3 and print a pre-signed download URL."""
+    try:
+        import boto3
+    except ImportError:
+        console.print(
+            "S3 upload requires boto3: pip install boto3", style="red"
+        )
+        raise typer.Exit(1)
+
+    # Parse s3://bucket/prefix
+    if not s3_uri.startswith("s3://"):
+        console.print(f"Invalid S3 URI: {s3_uri}", style="red")
+        raise typer.Exit(1)
+
+    parts = s3_uri[5:].split("/", 1)
+    bucket = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+
+    key = f"{prefix}riskattest-export-{export_id}.zip"
+
+    console.print(f"\nUploading to s3://{bucket}/{key} ...")
+    s3 = boto3.client("s3")
+    s3.upload_file(str(zip_path), bucket, key)
+    console.print(f"[green]Uploaded.[/green]")
+
+    # Generate pre-signed URL.
+    expiry_seconds = _parse_expiry(presign_expiry)
+    max_s3 = 604800  # 7 days
+    if expiry_seconds > max_s3:
+        console.print(
+            f"[yellow]S3 pre-signed URLs max out at 7 days; "
+            f"clamping {presign_expiry} to 7d.[/yellow]"
+        )
+        expiry_seconds = max_s3
+
+    url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expiry_seconds,
+    )
+    console.print(f"\n[bold]Pre-signed download URL[/bold] (expires in {presign_expiry}):")
+    console.print(f"  {url}")
+    console.print(
+        f"\nSend this URL to the regulator. They download, unzip, "
+        f"and run [bold]python verify_export.py[/bold]."
+    )
+
+
+@portal_app.command("list-exports")
+def portal_list_exports(
+    directory: str = typer.Option(
+        ".", "--dir", "-d",
+        help="Directory to scan for export ZIPs",
+    ),
+):
+    """List RiskAttest export packages in a directory.
+
+    Scans for ZIP files containing a ``manifest.json`` with an
+    ``export_id`` field.
+    """
+    import json as _json
+    from pathlib import Path as PathLib
+
+    scan_dir = PathLib(directory)
+    if not scan_dir.is_dir():
+        console.print(f"Not a directory: {scan_dir}", style="red")
+        raise typer.Exit(1)
+
+    exports: list = []
+    for zp in sorted(scan_dir.glob("*.zip")):
+        try:
+            with zipfile.ZipFile(zp, "r") as zf:
+                for name in zf.namelist():
+                    if name.endswith("manifest.json"):
+                        data = _json.loads(zf.read(name))
+                        if "export_id" in data:
+                            exports.append(
+                                {
+                                    "file": zp.name,
+                                    "export_id": data["export_id"],
+                                    "created_at": data.get(
+                                        "created_at", ""
+                                    )[:19],
+                                    "created_by": data.get(
+                                        "created_by", ""
+                                    ),
+                                    "models": data.get("scope", {}).get(
+                                        "models", []
+                                    ),
+                                    "packets": data.get("summary", {}).get(
+                                        "total_evidence_packets", 0
+                                    ),
+                                }
+                            )
+                        break
+        except Exception:
+            pass
+
+    if not exports:
+        console.print("No RiskAttest exports found", style="yellow")
+        raise typer.Exit(0)
+
+    table = Table(title="RiskAttest Exports", show_header=True)
+    table.add_column("File", style="cyan")
+    table.add_column("Export ID")
+    table.add_column("Created")
+    table.add_column("By")
+    table.add_column("Models")
+    table.add_column("Packets", justify="right")
+
+    for ex in exports:
+        table.add_row(
+            ex["file"],
+            ex["export_id"][:12] + "...",
+            ex["created_at"],
+            ex["created_by"][:20],
+            ", ".join(ex["models"])[:30],
+            str(ex["packets"]),
+        )
+
+    console.print(table)
+
+
+@portal_app.command("verify")
+def portal_verify(
+    zip_path: str = typer.Argument(
+        ..., help="Path to export ZIP file"
+    ),
+):
+    """Verify a RiskAttest export package.
+
+    Extracts the ZIP to a temp directory, runs verify_export.py, and
+    reports the result. This is exactly what the regulator does.
+
+    Example:
+
+        mrm portal verify /tmp/export.zip
+    """
+    import subprocess
+    import tempfile
+
+    from pathlib import Path as PathLib
+
+    zp = PathLib(zip_path)
+    if not zp.exists():
+        console.print(f"File not found: {zp}", style="red")
+        raise typer.Exit(1)
+
+    if not zipfile.is_zipfile(zp):
+        console.print(f"Not a valid ZIP: {zp}", style="red")
+        raise typer.Exit(1)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Extract
+        with zipfile.ZipFile(zp, "r") as zf:
+            zf.extractall(tmpdir)
+
+        # Find export directory
+        extracted = PathLib(tmpdir)
+        dirs = [d for d in extracted.iterdir() if d.is_dir()]
+        if not dirs:
+            console.print("No export directory found in ZIP", style="red")
+            raise typer.Exit(1)
+
+        export_dir = dirs[0]
+
+        verify_script = export_dir / "verify_export.py"
+        if not verify_script.exists():
+            console.print(
+                "verify_export.py not found in export", style="red"
+            )
+            raise typer.Exit(1)
+
+        console.print(f"Verifying: [bold]{zp.name}[/bold]")
+        console.print(f"Export dir: {export_dir.name}\n")
+
+        result = subprocess.run(
+            [sys.executable, str(verify_script)],
+            capture_output=True,
+            text=True,
+            cwd=str(export_dir),
+        )
+
+        # Print script output
+        if result.stdout:
+            console.print(result.stdout.rstrip())
+        if result.stderr:
+            console.print(result.stderr.rstrip(), style="dim")
+
+        if result.returncode == 0:
+            console.print(
+                "\n[green]Export verification PASSED[/green]"
+            )
+        else:
+            console.print(
+                "\n[red]Export verification FAILED[/red]"
+            )
+            raise typer.Exit(1)
 
 
 if __name__ == "__main__":
